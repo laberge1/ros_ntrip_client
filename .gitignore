@@ -1,0 +1,31 @@
+# Catkin / CMake
+build/
+devel/
+install/
+log/
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+Makefile
+cmake_install.cmake
+compile_commands.json
+CTestTestfile.cmake
+catkin_generated/
+.devel.env
+*.catkin
+
+# Python
+__pycache__/
+*.py[cod]
+
+# ROS generated / runtime
+*.bag
+*.active
+*.log
+*.og
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

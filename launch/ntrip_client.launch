@@ -1,0 +1,5 @@
+<launch>
+  <node pkg="ros_ntrip_client" type="ntrip_client_node" name="ntrip_client" output="screen">
+    <rosparam command="load" file="$(find ros_ntrip_client)/config/ntrip_client.yaml" />
+  </node>
+</launch>
