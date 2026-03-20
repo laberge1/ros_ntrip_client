@@ -281,11 +281,19 @@ void NtripClient::stop()
 
 void NtripClient::updateGgaSentence(const std::string& gga_sentence)
 {
-  std::lock_guard<std::mutex> lock(mutex_);
-  latest_gga_sentence_ = gga_sentence;
-  if (active_socket_ >= 0)
+  int socket_fd = -1;
   {
-    sendLatestGgaLocked(active_socket_);
+    std::lock_guard<std::mutex> lock(mutex_);
+    latest_gga_sentence_ = gga_sentence;
+    if (active_socket_ >= 0)
+    {
+      socket_fd = active_socket_;
+    }
+  }
+
+  if (socket_fd >= 0)
+  {
+    sendCurrentGga(socket_fd);
   }
 }
 
@@ -761,8 +769,7 @@ bool NtripClient::readResponseHeaders(int socket_fd, std::string& headers)
 
   if (config_.send_initial_gga)
   {
-    std::lock_guard<std::mutex> lock(mutex_);
-    sendLatestGgaLocked(socket_fd);
+    sendCurrentGga(socket_fd);
   }
 
   return true;
@@ -1096,14 +1103,23 @@ bool NtripClient::sendRaw(int socket_fd, const std::string& bytes)
   return total_sent == bytes.size();
 }
 
-bool NtripClient::sendLatestGgaLocked(int socket_fd)
+bool NtripClient::sendCurrentGga(int socket_fd)
 {
-  if (latest_gga_sentence_.empty())
+  std::string sentence;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (latest_gga_sentence_.empty())
+    {
+      return false;
+    }
+    sentence = latest_gga_sentence_;
+  }
+
+  if (sentence.empty())
   {
     return false;
   }
 
-  std::string sentence = latest_gga_sentence_;
   if (sentence.back() != '\n')
   {
     sentence += "\r\n";

@@ -72,6 +72,7 @@ private:
   bool sleepForSeconds(double seconds) const;
   ssize_t readSome(int socket_fd, void* buffer, std::size_t buffer_size);
   ssize_t writeSome(int socket_fd, const void* buffer, std::size_t buffer_size);
+  bool sendCurrentGga(int socket_fd);
   void processRtcmBytes(const std::uint8_t* data, std::size_t size);
   bool dispatchRtcmFrames();
   bool extractRtcmFrame(std::vector<std::uint8_t>& frame);
@@ -80,7 +81,6 @@ private:
   void resetFailureTracking();
   double computeAdaptiveMinimumDelaySec() const;
   bool sendRaw(int socket_fd, const std::string& bytes);
-  bool sendLatestGgaLocked(int socket_fd);
   double computeBackoffDelaySec(int attempt_number) const;
   void setStatus(const std::string& status) const;
 
