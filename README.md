@@ -28,6 +28,7 @@ Publishes:
 - `rtcm` (`rtcm_msgs/Message`)
 - `ntrip_status` (`std_msgs/String`)
 - `ntrip_status_code` (`std_msgs/String`)
+- `ntrip_counters` (`std_msgs/String`)
 
 Subscribes:
 
@@ -97,12 +98,21 @@ Structured status:
 
 - `ntrip_status` remains the human-readable status text
 - `ntrip_status_code` publishes a machine-readable code such as:
+  - `SESSION_ACCEPTED`
   - `STREAM_ACTIVE`
+  - `SESSION_EMPTY`
+  - `SESSION_NO_VALID_RTCM`
   - `AUTH_FAILED`
   - `MOUNTPOINT_INVALID`
   - `RATE_LIMITED`
   - `RTCM_TIMEOUT`
   - `BACKOFF`
+- `ntrip_counters` publishes parser and transport counters such as:
+  - `bytes_received`
+  - `frames_published`
+  - `crc_failures`
+  - `discarded_bytes`
+  - `buffer_trimmed_bytes`
 
 ## Launch
 

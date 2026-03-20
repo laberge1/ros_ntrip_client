@@ -48,6 +48,15 @@ struct NtripClientConfig
   bool send_initial_gga = false;
 };
 
+struct NtripClientCounters
+{
+  std::uint64_t bytes_received = 0U;
+  std::uint64_t frames_published = 0U;
+  std::uint64_t crc_failures = 0U;
+  std::uint64_t discarded_bytes = 0U;
+  std::uint64_t buffer_trimmed_bytes = 0U;
+};
+
 class NtripClient
 {
 public:
@@ -60,6 +69,7 @@ public:
   bool start(DataCallback data_callback, StatusCallback status_callback = StatusCallback());
   void stop();
   void updateGgaSentence(const std::string& gga_sentence);
+  NtripClientCounters getCounters() const;
 
 private:
   void workerLoop();
@@ -98,6 +108,13 @@ private:
   std::deque<std::chrono::steady_clock::time_point> recent_failure_attempts_;
   std::chrono::steady_clock::time_point failure_window_start_{};
   bool failure_window_active_{false};
+  bool first_rtcm_frame_received_{false};
+  bool stream_active_status_sent_{false};
+  bool reconnect_state_reset_for_session_{false};
+  std::chrono::steady_clock::time_point last_rtcm_frame_at_{};
+  NtripClientCounters counters_;
+  std::uint64_t session_bytes_received_{0U};
+  std::uint64_t session_frames_published_{0U};
   std::string latest_gga_sentence_;
 };
 

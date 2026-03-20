@@ -297,6 +297,12 @@ void NtripClient::updateGgaSentence(const std::string& gga_sentence)
   }
 }
 
+NtripClientCounters NtripClient::getCounters() const
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+  return counters_;
+}
+
 void NtripClient::workerLoop()
 {
   int attempts = 0;
@@ -334,18 +340,26 @@ void NtripClient::workerLoop()
     {
       std::lock_guard<std::mutex> lock(mutex_);
       active_socket_ = socket_fd;
+      first_rtcm_frame_received_ = false;
+      stream_active_status_sent_ = false;
+      reconnect_state_reset_for_session_ = false;
+      last_rtcm_frame_at_ = std::chrono::steady_clock::time_point{};
+      session_bytes_received_ = 0U;
+      session_frames_published_ = 0U;
     }
     rtcm_buffer_.clear();
 
     const bool request_sent = sendRequest(socket_fd);
     std::string headers;
     const bool response_ok = request_sent && readResponseHeaders(socket_fd, headers);
-    if (response_ok)
-    {
-      attempts = 0;
-      resetFailureTracking();
-    }
     const bool streamed_ok = response_ok && streamData(socket_fd);
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (reconnect_state_reset_for_session_)
+      {
+        attempts = 0;
+      }
+    }
 
     {
       std::lock_guard<std::mutex> lock(mutex_);
@@ -686,7 +700,17 @@ bool NtripClient::readResponseHeaders(int socket_fd, std::string& headers)
   while (running_ && findHeaderEnd(headers) == std::string::npos)
   {
     const ssize_t received = readSome(socket_fd, buffer.data(), buffer.size());
-    if (received <= 0)
+    if (received == kReadTimeoutResult)
+    {
+      setStatus("timed out waiting for caster response headers");
+      return false;
+    }
+    if (received == 0)
+    {
+      setStatus("caster closed the connection before sending response headers");
+      return false;
+    }
+    if (received < 0)
     {
       setStatus("failed to read response headers");
       return false;
@@ -778,14 +802,20 @@ bool NtripClient::readResponseHeaders(int socket_fd, std::string& headers)
 bool NtripClient::streamData(int socket_fd)
 {
   std::array<std::uint8_t, 4096> buffer{};
-  bool first_rtcm_received = false;
-  auto last_rtcm_at = std::chrono::steady_clock::now();
 
   while (running_)
   {
     const ssize_t received = readSome(socket_fd, buffer.data(), buffer.size());
     if (received == kReadTimeoutResult)
     {
+      bool first_rtcm_received = false;
+      std::chrono::steady_clock::time_point last_rtcm_at;
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        first_rtcm_received = first_rtcm_frame_received_;
+        last_rtcm_at = last_rtcm_frame_at_;
+      }
+
       if (first_rtcm_received)
       {
         const auto now = std::chrono::steady_clock::now();
@@ -803,7 +833,29 @@ bool NtripClient::streamData(int socket_fd)
     }
     if (received == 0)
     {
-      setStatus("caster closed the connection");
+      std::uint64_t session_bytes_received = 0U;
+      std::uint64_t session_frames_published = 0U;
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        session_bytes_received = session_bytes_received_;
+        session_frames_published = session_frames_published_;
+      }
+
+      if (session_frames_published == 0U)
+      {
+        if (session_bytes_received == 0U)
+        {
+          setStatus("caster accepted session but closed before sending any stream data");
+        }
+        else
+        {
+          setStatus("caster accepted session but no valid RTCM frames were received before close");
+        }
+      }
+      else
+      {
+        setStatus("caster closed the connection");
+      }
       return false;
     }
     if (received < 0)
@@ -813,11 +865,7 @@ bool NtripClient::streamData(int socket_fd)
     }
 
     processRtcmBytes(buffer.data(), static_cast<std::size_t>(received));
-    if (dispatchRtcmFrames())
-    {
-      first_rtcm_received = true;
-      last_rtcm_at = std::chrono::steady_clock::now();
-    }
+    dispatchRtcmFrames();
   }
 
   return true;
@@ -903,12 +951,22 @@ void NtripClient::processRtcmBytes(const std::uint8_t* data, std::size_t size)
     return;
   }
 
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    counters_.bytes_received += static_cast<std::uint64_t>(size);
+    session_bytes_received_ += static_cast<std::uint64_t>(size);
+  }
   rtcm_buffer_.insert(rtcm_buffer_.end(), data, data + size);
   if (rtcm_buffer_.size() > kMaxRtcmBufferSize)
   {
     setStatus("RTCM parser buffer exceeded 10KB; trimming");
-    rtcm_buffer_.erase(rtcm_buffer_.begin(),
-                       rtcm_buffer_.begin() + (rtcm_buffer_.size() - kMaxRtcmBufferSize));
+    const std::size_t trimmed = rtcm_buffer_.size() - kMaxRtcmBufferSize;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      counters_.buffer_trimmed_bytes += static_cast<std::uint64_t>(trimmed);
+      counters_.discarded_bytes += static_cast<std::uint64_t>(trimmed);
+    }
+    rtcm_buffer_.erase(rtcm_buffer_.begin(), rtcm_buffer_.begin() + trimmed);
   }
 }
 
@@ -919,6 +977,32 @@ bool NtripClient::dispatchRtcmFrames()
   while (extractRtcmFrame(frame))
   {
     data_callback_(frame);
+    bool emit_stream_active = false;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      counters_.frames_published += 1U;
+      session_frames_published_ += 1U;
+      last_rtcm_frame_at_ = std::chrono::steady_clock::now();
+      if (!first_rtcm_frame_received_)
+      {
+        first_rtcm_frame_received_ = true;
+      }
+      if (!stream_active_status_sent_)
+      {
+        stream_active_status_sent_ = true;
+        emit_stream_active = true;
+      }
+    }
+    if (emit_stream_active)
+    {
+      resetFailureTracking();
+      setStatus("successful stream established; reconnect state reset");
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        reconnect_state_reset_for_session_ = true;
+      }
+      setStatus("RTCM stream active");
+    }
     published = true;
   }
   return published;
@@ -990,6 +1074,10 @@ bool NtripClient::extractRtcmFrame(std::vector<std::uint8_t>& frame)
   {
     if (rtcm_buffer_.front() != kRtcmPreamble)
     {
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        counters_.discarded_bytes += 1U;
+      }
       rtcm_buffer_.erase(rtcm_buffer_.begin());
       continue;
     }
@@ -1012,6 +1100,11 @@ bool NtripClient::extractRtcmFrame(std::vector<std::uint8_t>& frame)
     if (expected_checksum != actual_checksum)
     {
       setStatus("discarding RTCM packet with invalid CRC");
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        counters_.crc_failures += 1U;
+        counters_.discarded_bytes += 1U;
+      }
       rtcm_buffer_.erase(rtcm_buffer_.begin());
       continue;
     }

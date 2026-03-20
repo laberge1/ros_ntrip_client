@@ -36,6 +36,10 @@ std::string statusCodeForMessage(const std::string& message)
   }
   if (message == "caster accepted stream")
   {
+    return "SESSION_ACCEPTED";
+  }
+  if (message == "RTCM stream active")
+  {
     return "STREAM_ACTIVE";
   }
   if (message.find("received unauthorized response") == 0)
@@ -104,10 +108,22 @@ std::string statusCodeForMessage(const std::string& message)
   {
     return "STREAM_CLOSED";
   }
+  if (message == "caster accepted session but closed before sending any stream data")
+  {
+    return "SESSION_EMPTY";
+  }
+  if (message == "caster accepted session but no valid RTCM frames were received before close")
+  {
+    return "SESSION_NO_VALID_RTCM";
+  }
   if (message.find("stream disconnected, backing off for") == 0 ||
       message.find("connect failed, backing off for") == 0)
   {
     return "BACKOFF";
+  }
+  if (message == "successful stream established; reconnect state reset")
+  {
+    return "STREAM_RECOVERED";
   }
   if (message.find("stream read failed") == 0 ||
       message.find("socket read failed") == 0 ||
@@ -257,6 +273,7 @@ int main(int argc, char** argv)
   ros::Publisher rtcm_pub = nh.advertise<rtcm_msgs::Message>("rtcm", 10);
   ros::Publisher status_pub = nh.advertise<std_msgs::String>("ntrip_status", 10, true);
   ros::Publisher status_code_pub = nh.advertise<std_msgs::String>("ntrip_status_code", 10, true);
+  ros::Publisher counters_pub = nh.advertise<std_msgs::String>("ntrip_counters", 10, true);
 
   ros_ntrip_client::NtripClient client(config);
   auto latest_gga = std::make_shared<std::string>();
@@ -274,6 +291,21 @@ int main(int argc, char** argv)
     ROS_INFO_STREAM_THROTTLE(5.0, "NTRIP: " << message);
   };
 
+  auto publish_counters = [&]()
+  {
+    const ros_ntrip_client::NtripClientCounters counters = client.getCounters();
+    std::ostringstream stream;
+    stream << "bytes_received=" << counters.bytes_received
+           << " frames_published=" << counters.frames_published
+           << " crc_failures=" << counters.crc_failures
+           << " discarded_bytes=" << counters.discarded_bytes
+           << " buffer_trimmed_bytes=" << counters.buffer_trimmed_bytes;
+
+    std_msgs::String counters_msg;
+    counters_msg.data = stream.str();
+    counters_pub.publish(counters_msg);
+  };
+
   ros::Subscriber gga_sub = nh.subscribe<nmea_msgs::Sentence>(
       gga_topic, 10, [&](const nmea_msgs::Sentence::ConstPtr& msg)
       {
@@ -286,6 +318,9 @@ int main(int argc, char** argv)
     *latest_gga = positionToGga(fixed_latitude_deg, fixed_longitude_deg, fixed_altitude_m);
     client.updateGgaSentence(*latest_gga);
   }
+
+  ros::Timer counters_timer = nh.createTimer(
+      ros::Duration(1.0), [&](const ros::TimerEvent&) { publish_counters(); });
 
   std::unique_ptr<ros::Timer> gga_timer;
   if (gga_send_interval_sec > 0.0)
@@ -324,6 +359,8 @@ int main(int argc, char** argv)
     ROS_FATAL("Failed to start NTRIP client.");
     return 1;
   }
+
+  publish_counters();
 
   ros::AsyncSpinner spinner(2);
   spinner.start();
