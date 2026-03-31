@@ -5,11 +5,13 @@
 #include <cerrno>
 #include <chrono>
 #include <cmath>
+#include <fcntl.h>
 #include <iomanip>
 #include <random>
 #include <sstream>
 #include <string>
 
+#include <sys/select.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -30,6 +32,7 @@ NtripClient::NtripClient(NtripClientConfig config)
 NtripClient::~NtripClient()
 {
   stop();
+  closeWakePipe();
 }
 
 bool NtripClient::start(DataCallback data_callback, StatusCallback status_callback)
@@ -37,6 +40,12 @@ bool NtripClient::start(DataCallback data_callback, StatusCallback status_callba
   if (!data_callback)
   {
     setStatus(StatusCode::Info, "refusing to start without a data callback");
+    return false;
+  }
+
+  if (!ensureWakePipe())
+  {
+    setStatus(StatusCode::Info, "failed to initialize worker wake pipe");
     return false;
   }
 
@@ -86,6 +95,7 @@ void NtripClient::stop()
   {
     shutdown(socket_to_shutdown, SHUT_RDWR);
   }
+  notifyWorker();
 
   if (worker_thread_.joinable())
   {
@@ -106,19 +116,21 @@ void NtripClient::stop()
 
 void NtripClient::updateGgaSentence(const std::string& gga_sentence)
 {
-  int socket_fd = -1;
+  bool should_notify = false;
   {
     std::lock_guard<std::mutex> lock(mutex_);
     session_.latest_gga_sentence = gga_sentence;
-    if (session_.uplink_ready && transport_.socket_fd >= 0)
+    ++session_.latest_gga_generation;
+    if (session_.uplink_ready)
     {
-      socket_fd = transport_.socket_fd;
+      session_.queued_gga_generation = session_.latest_gga_generation;
+      should_notify = true;
     }
   }
 
-  if (socket_fd >= 0)
+  if (should_notify)
   {
-    sendCurrentGga(socket_fd);
+    notifyWorker();
   }
 }
 
@@ -268,6 +280,7 @@ void NtripClient::workerLoop()
 void NtripClient::resetSessionStateLocked()
 {
   session_.uplink_ready = false;
+  session_.queued_gga_generation = 0U;
   session_.first_rtcm_frame_received = false;
   session_.stream_active_status_sent = false;
   session_.reconnect_state_reset = false;
@@ -278,6 +291,74 @@ void NtripClient::resetSessionStateLocked()
   session_.rtcm_buffer.clear();
 }
 
+bool NtripClient::ensureWakePipe()
+{
+  if (wake_pipe_read_fd_ >= 0 && wake_pipe_write_fd_ >= 0)
+  {
+    return true;
+  }
+
+  int pipe_fds[2] = {-1, -1};
+  if (pipe(pipe_fds) != 0)
+  {
+    return false;
+  }
+
+  const int read_flags = fcntl(pipe_fds[0], F_GETFL, 0);
+  const int write_flags = fcntl(pipe_fds[1], F_GETFL, 0);
+  if (read_flags < 0 || write_flags < 0 ||
+      fcntl(pipe_fds[0], F_SETFL, read_flags | O_NONBLOCK) < 0 ||
+      fcntl(pipe_fds[1], F_SETFL, write_flags | O_NONBLOCK) < 0)
+  {
+    close(pipe_fds[0]);
+    close(pipe_fds[1]);
+    return false;
+  }
+
+  wake_pipe_read_fd_ = pipe_fds[0];
+  wake_pipe_write_fd_ = pipe_fds[1];
+  return true;
+}
+
+void NtripClient::closeWakePipe()
+{
+  if (wake_pipe_read_fd_ >= 0)
+  {
+    close(wake_pipe_read_fd_);
+    wake_pipe_read_fd_ = -1;
+  }
+  if (wake_pipe_write_fd_ >= 0)
+  {
+    close(wake_pipe_write_fd_);
+    wake_pipe_write_fd_ = -1;
+  }
+}
+
+void NtripClient::notifyWorker()
+{
+  if (wake_pipe_write_fd_ < 0)
+  {
+    return;
+  }
+
+  const std::uint8_t byte = 0x01U;
+  const ssize_t rc = write(wake_pipe_write_fd_, &byte, sizeof(byte));
+  (void)rc;
+}
+
+void NtripClient::drainWakePipe()
+{
+  if (wake_pipe_read_fd_ < 0)
+  {
+    return;
+  }
+
+  std::array<std::uint8_t, 64> buffer{};
+  while (read(wake_pipe_read_fd_, buffer.data(), buffer.size()) > 0)
+  {
+  }
+}
+
 bool NtripClient::streamData(int socket_fd)
 {
   std::array<std::uint8_t, 4096> buffer{};
@@ -285,8 +366,46 @@ bool NtripClient::streamData(int socket_fd)
 
   while (running_)
   {
-    const ssize_t received = readSome(socket_fd, buffer.data(), buffer.size());
-    if (received == kReadTimeoutResult)
+    if (sendQueuedGgaIfNeeded(socket_fd))
+    {
+      continue;
+    }
+
+    double timeout_sec = config_.session_start_timeout_sec;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      const auto now = std::chrono::steady_clock::now();
+      if (session_.first_rtcm_frame_received)
+      {
+        const std::chrono::duration<double> remaining =
+            std::chrono::duration<double>(config_.rtcm_timeout_sec) -
+            (now - session_.last_rtcm_frame_at);
+        timeout_sec = std::max(0.0, remaining.count());
+      }
+      else
+      {
+        const std::chrono::duration<double> remaining =
+            std::chrono::duration<double>(config_.session_start_timeout_sec) -
+            (now - session_started_at);
+        timeout_sec = std::max(0.0, remaining.count());
+      }
+    }
+
+    fd_set read_fds;
+    FD_ZERO(&read_fds);
+    FD_SET(socket_fd, &read_fds);
+    int max_fd = socket_fd;
+    if (wake_pipe_read_fd_ >= 0)
+    {
+      FD_SET(wake_pipe_read_fd_, &read_fds);
+      max_fd = std::max(max_fd, wake_pipe_read_fd_);
+    }
+
+    timeval timeout{};
+    timeout.tv_sec = static_cast<long>(timeout_sec);
+    timeout.tv_usec = static_cast<long>((timeout_sec - static_cast<double>(timeout.tv_sec)) * 1e6);
+    const int wait_rc = select(max_fd + 1, &read_fds, nullptr, nullptr, &timeout);
+    if (wait_rc == 0)
     {
       bool first_rtcm_received = false;
       std::chrono::steady_clock::time_point last_rtcm_at;
@@ -329,6 +448,32 @@ bool NtripClient::streamData(int socket_fd)
           return false;
         }
       }
+      continue;
+    }
+
+    if (wait_rc < 0)
+    {
+      if (errno == EINTR)
+      {
+        continue;
+      }
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        session_.last_failure_category = FailureCategory::Transport;
+      }
+      setStatus(StatusCode::ReadFailed, "stream wait failed");
+      return false;
+    }
+
+    if (wake_pipe_read_fd_ >= 0 && FD_ISSET(wake_pipe_read_fd_, &read_fds))
+    {
+      drainWakePipe();
+      continue;
+    }
+
+    const ssize_t received = readSome(socket_fd, buffer.data(), buffer.size());
+    if (received == kReadTimeoutResult)
+    {
       continue;
     }
     if (received == 0)
@@ -397,6 +542,28 @@ bool NtripClient::sleepForSeconds(double seconds) const
   return running_;
 }
 
+bool NtripClient::sendQueuedGgaIfNeeded(int socket_fd)
+{
+  std::uint64_t queued_generation = 0U;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!session_.uplink_ready || session_.queued_gga_generation == 0U)
+    {
+      return false;
+    }
+    queued_generation = session_.queued_gga_generation;
+  }
+
+  const bool sent = sendCurrentGga(socket_fd);
+  if (!sent)
+  {
+    return false;
+  }
+
+  std::lock_guard<std::mutex> lock(mutex_);
+  return session_.queued_gga_generation != queued_generation;
+}
+
 void NtripClient::recordFailureAttempt()
 {
   if (!config_.adaptive_reconnect)
@@ -460,6 +627,7 @@ double NtripClient::computeAdaptiveMinimumDelaySec() const
 bool NtripClient::sendCurrentGga(int socket_fd)
 {
   std::string sentence;
+  std::uint64_t generation = 0U;
   {
     std::lock_guard<std::mutex> lock(mutex_);
     if (session_.latest_gga_sentence.empty())
@@ -467,6 +635,7 @@ bool NtripClient::sendCurrentGga(int socket_fd)
       return false;
     }
     sentence = session_.latest_gga_sentence;
+    generation = session_.latest_gga_generation;
   }
 
   if (sentence.empty())
@@ -478,7 +647,19 @@ bool NtripClient::sendCurrentGga(int socket_fd)
   {
     sentence += "\r\n";
   }
-  return sendRaw(socket_fd, sentence);
+  if (!sendRaw(socket_fd, sentence))
+  {
+    return false;
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (session_.queued_gga_generation == generation)
+    {
+      session_.queued_gga_generation = 0U;
+    }
+  }
+  return true;
 }
 
 double NtripClient::computeBackoffDelaySec(int attempt_number) const

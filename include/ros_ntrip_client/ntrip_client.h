@@ -136,6 +136,8 @@ private:
   {
     std::vector<std::uint8_t> rtcm_buffer;
     bool uplink_ready = false;
+    std::uint64_t queued_gga_generation = 0U;
+    std::uint64_t latest_gga_generation = 0U;
     bool first_rtcm_frame_received = false;
     bool stream_active_status_sent = false;
     bool reconnect_state_reset = false;
@@ -166,6 +168,11 @@ private:
   bool readResponseHeaders(int socket_fd, std::string& headers);
   bool streamData(int socket_fd);
   bool sleepForSeconds(double seconds) const;
+  bool ensureWakePipe();
+  void closeWakePipe();
+  void notifyWorker();
+  void drainWakePipe();
+  bool sendQueuedGgaIfNeeded(int socket_fd);
   ssize_t readSome(int socket_fd, void* buffer, std::size_t buffer_size);
   ssize_t writeSome(int socket_fd, const void* buffer, std::size_t buffer_size);
   bool sendCurrentGga(int socket_fd);
@@ -187,13 +194,14 @@ private:
   StatusCallback status_callback_;
 
   mutable std::mutex mutex_;
-  std::mutex send_mutex_;
   std::thread worker_thread_;
   std::atomic<bool> running_{false};
   NtripClientCounters counters_;
   TransportState transport_;
   SessionState session_;
   ReconnectState reconnect_;
+  int wake_pipe_read_fd_{-1};
+  int wake_pipe_write_fd_{-1};
 };
 
 }  // namespace ros_ntrip_client

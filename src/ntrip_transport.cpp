@@ -441,8 +441,6 @@ NtripClient::TransportState NtripClient::detachActiveTransportLocked()
 
 void NtripClient::cleanupDetachedTransport(TransportState transport)
 {
-  std::lock_guard<std::mutex> send_lock(send_mutex_);
-
   if (transport.ssl != nullptr)
   {
     SSL_free(transport.ssl);
@@ -741,8 +739,6 @@ ssize_t NtripClient::writeSome(int socket_fd, const void* buffer, std::size_t bu
 
 bool NtripClient::sendRaw(int socket_fd, const std::string& bytes)
 {
-  std::lock_guard<std::mutex> send_lock(send_mutex_);
-
   std::size_t total_sent = 0U;
   while (running_ && total_sent < bytes.size())
   {
