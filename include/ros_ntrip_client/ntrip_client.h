@@ -61,6 +61,46 @@ struct NtripClientCounters
   std::uint64_t buffer_trimmed_bytes = 0U;
 };
 
+enum class StatusCode
+{
+  Info,
+  Connecting,
+  TcpConnected,
+  TlsEstablished,
+  RequestSent,
+  SessionAccepted,
+  StreamActive,
+  AuthFailed,
+  AccessForbidden,
+  MountpointInvalid,
+  RateLimited,
+  ServiceUnavailable,
+  UpstreamError,
+  DnsFailed,
+  ConnectFailed,
+  RequestFailed,
+  TransportHeaderFailed,
+  ProtocolError,
+  TlsError,
+  SessionStartTimeout,
+  RtcmTimeout,
+  StreamClosed,
+  SessionEmpty,
+  SessionNoValidRtcm,
+  Backoff,
+  StreamRecovered,
+  ReadFailed,
+  StoppedMaxAttempts,
+  RtcmCrcError,
+  RtcmBufferTrimmed
+};
+
+struct StatusEvent
+{
+  StatusCode code = StatusCode::Info;
+  std::string message;
+};
+
 enum class FailureCategory
 {
   None,
@@ -72,7 +112,7 @@ class NtripClient
 {
 public:
   using DataCallback = std::function<void(const std::vector<std::uint8_t>&)>;
-  using StatusCallback = std::function<void(const std::string&)>;
+  using StatusCallback = std::function<void(const StatusEvent&)>;
 
   explicit NtripClient(NtripClientConfig config);
   ~NtripClient();
@@ -104,7 +144,7 @@ private:
   bool sendRaw(int socket_fd, const std::string& bytes);
   double computeBackoffDelaySec(int attempt_number) const;
   double computeTransportBackoffDelaySec(int attempt_number) const;
-  void setStatus(const std::string& status) const;
+  void setStatus(StatusCode code, const std::string& status) const;
 
   NtripClientConfig config_;
   DataCallback data_callback_;

@@ -237,14 +237,14 @@ bool NtripClient::start(DataCallback data_callback, StatusCallback status_callba
 {
   if (!data_callback)
   {
-    setStatus("refusing to start without a data callback");
+    setStatus(StatusCode::Info, "refusing to start without a data callback");
     return false;
   }
 
   bool expected = false;
   if (!running_.compare_exchange_strong(expected, true))
   {
-    setStatus("client is already running");
+    setStatus(StatusCode::Info, "client is already running");
     return false;
   }
 
@@ -312,14 +312,14 @@ void NtripClient::workerLoop()
   {
     if (config_.max_attempts > 0 && total_failed_cycles >= config_.max_attempts)
     {
-      setStatus("maximum connection attempts reached");
+      setStatus(StatusCode::StoppedMaxAttempts, "maximum connection attempts reached");
       break;
     }
 
     ++display_attempts;
     std::ostringstream attempt_msg;
     attempt_msg << "connection attempt " << display_attempts;
-    setStatus(attempt_msg.str());
+    setStatus(StatusCode::Connecting, attempt_msg.str());
 
     int socket_fd = connectToCaster();
     if (socket_fd < 0)
@@ -331,7 +331,7 @@ void NtripClient::workerLoop()
       std::ostringstream msg;
       msg << "transport connect failed, backing off for " << std::fixed << std::setprecision(2)
           << delay_sec << "s";
-      setStatus(msg.str());
+      setStatus(StatusCode::Backoff, msg.str());
       if (!sleepForSeconds(delay_sec))
       {
         break;
@@ -410,7 +410,7 @@ void NtripClient::workerLoop()
             << delay_sec << "s";
       }
 
-      setStatus(msg.str());
+      setStatus(StatusCode::Backoff, msg.str());
       if (!sleepForSeconds(delay_sec))
       {
         break;
@@ -441,7 +441,7 @@ int NtripClient::connectToCaster()
   const int rc = getaddrinfo(config_.host.c_str(), port_str.c_str(), &hints, &addresses);
   if (rc != 0)
   {
-    setStatus(std::string("DNS resolution failed: ") + gai_strerror(rc));
+    setStatus(StatusCode::DnsFailed, std::string("DNS resolution failed: ") + gai_strerror(rc));
     return -1;
   }
 
@@ -521,11 +521,11 @@ int NtripClient::connectToCaster()
 
   if (connected_socket >= 0)
   {
-    setStatus("connected to caster");
+    setStatus(StatusCode::TcpConnected, "connected to caster");
   }
   else
   {
-    setStatus("unable to connect to any resolved address");
+    setStatus(StatusCode::ConnectFailed, "unable to connect to any resolved address");
   }
   return connected_socket;
 }
@@ -535,7 +535,7 @@ bool NtripClient::configureTlsForSocket(int socket_fd)
   SSL_CTX* ssl_ctx = SSL_CTX_new(TLS_client_method());
   if (ssl_ctx == nullptr)
   {
-    setStatus(std::string("failed to create TLS context: ") + currentSslError());
+    setStatus(StatusCode::TlsError, std::string("failed to create TLS context: ") + currentSslError());
     return false;
   }
 
@@ -550,14 +550,14 @@ bool NtripClient::configureTlsForSocket(int socket_fd)
           config_.tls_ca_cert_path.empty() ? nullptr : config_.tls_ca_cert_path.c_str());
       if (load_ok != 1)
       {
-        setStatus(std::string("failed to load CA bundle: ") + currentSslError());
+        setStatus(StatusCode::TlsError, std::string("failed to load CA bundle: ") + currentSslError());
         SSL_CTX_free(ssl_ctx);
         return false;
       }
     }
     else if (SSL_CTX_set_default_verify_paths(ssl_ctx) != 1)
     {
-      setStatus(std::string("failed to load system CA bundle: ") + currentSslError());
+      setStatus(StatusCode::TlsError, std::string("failed to load system CA bundle: ") + currentSslError());
       SSL_CTX_free(ssl_ctx);
       return false;
     }
@@ -580,7 +580,7 @@ bool NtripClient::configureTlsForSocket(int socket_fd)
         SSL_CTX_use_certificate_chain_file(ssl_ctx, config_.tls_client_cert_file.c_str());
     if (cert_ok != 1)
     {
-      setStatus(std::string("failed to load client certificate: ") + currentSslError());
+      setStatus(StatusCode::TlsError, std::string("failed to load client certificate: ") + currentSslError());
       SSL_CTX_free(ssl_ctx);
       return false;
     }
@@ -592,7 +592,7 @@ bool NtripClient::configureTlsForSocket(int socket_fd)
         ssl_ctx, config_.tls_client_key_file.c_str(), SSL_FILETYPE_PEM);
     if (key_ok != 1)
     {
-      setStatus(std::string("failed to load client private key: ") + currentSslError());
+      setStatus(StatusCode::TlsError, std::string("failed to load client private key: ") + currentSslError());
       SSL_CTX_free(ssl_ctx);
       return false;
     }
@@ -601,7 +601,7 @@ bool NtripClient::configureTlsForSocket(int socket_fd)
   if ((!config_.tls_client_cert_file.empty() && config_.tls_client_key_file.empty()) ||
       (config_.tls_client_cert_file.empty() && !config_.tls_client_key_file.empty()))
   {
-    setStatus("both tls_client_cert_file and tls_client_key_file are required for mTLS");
+    setStatus(StatusCode::TlsError, "both tls_client_cert_file and tls_client_key_file are required for mTLS");
     SSL_CTX_free(ssl_ctx);
     return false;
   }
@@ -611,7 +611,7 @@ bool NtripClient::configureTlsForSocket(int socket_fd)
     const int key_match_ok = SSL_CTX_check_private_key(ssl_ctx);
     if (key_match_ok != 1)
     {
-      setStatus("client certificate and private key do not match");
+      setStatus(StatusCode::TlsError, "client certificate and private key do not match");
       SSL_CTX_free(ssl_ctx);
       return false;
     }
@@ -620,7 +620,7 @@ bool NtripClient::configureTlsForSocket(int socket_fd)
   SSL* ssl = SSL_new(ssl_ctx);
   if (ssl == nullptr)
   {
-    setStatus(std::string("failed to create TLS session: ") + currentSslError());
+    setStatus(StatusCode::TlsError, std::string("failed to create TLS session: ") + currentSslError());
     SSL_CTX_free(ssl_ctx);
     return false;
   }
@@ -642,7 +642,7 @@ bool NtripClient::configureTlsForSocket(int socket_fd)
   const int connect_ok = SSL_connect(ssl);
   if (connect_ok != 1)
   {
-    setStatus(std::string("TLS handshake failed: ") + currentSslError());
+    setStatus(StatusCode::TlsError, std::string("TLS handshake failed: ") + currentSslError());
     SSL_free(ssl);
     SSL_CTX_free(ssl_ctx);
     return false;
@@ -650,7 +650,7 @@ bool NtripClient::configureTlsForSocket(int socket_fd)
 
   if (config_.tls_verify_peer && SSL_get_verify_result(ssl) != X509_V_OK)
   {
-    setStatus("TLS peer certificate verification failed");
+    setStatus(StatusCode::TlsError, "TLS peer certificate verification failed");
     SSL_free(ssl);
     SSL_CTX_free(ssl_ctx);
     return false;
@@ -662,7 +662,7 @@ bool NtripClient::configureTlsForSocket(int socket_fd)
     active_ssl_ = ssl;
   }
 
-  setStatus("TLS session established");
+  setStatus(StatusCode::TlsEstablished, "TLS session established");
   return true;
 }
 
@@ -716,11 +716,11 @@ bool NtripClient::sendRequest(int socket_fd)
       std::lock_guard<std::mutex> lock(mutex_);
       last_failure_category_ = FailureCategory::Transport;
     }
-    setStatus("failed to send NTRIP request");
+    setStatus(StatusCode::RequestFailed, "failed to send NTRIP request");
     return false;
   }
 
-  setStatus("request sent");
+  setStatus(StatusCode::RequestSent, "request sent");
   return true;
 }
 
@@ -738,7 +738,7 @@ bool NtripClient::readResponseHeaders(int socket_fd, std::string& headers)
         std::lock_guard<std::mutex> lock(mutex_);
         last_failure_category_ = FailureCategory::Transport;
       }
-      setStatus("timed out waiting for caster response headers");
+      setStatus(StatusCode::TransportHeaderFailed, "timed out waiting for caster response headers");
       return false;
     }
     if (received == 0)
@@ -747,7 +747,7 @@ bool NtripClient::readResponseHeaders(int socket_fd, std::string& headers)
         std::lock_guard<std::mutex> lock(mutex_);
         last_failure_category_ = FailureCategory::Transport;
       }
-      setStatus("caster closed the connection before sending response headers");
+      setStatus(StatusCode::TransportHeaderFailed, "caster closed the connection before sending response headers");
       return false;
     }
     if (received < 0)
@@ -756,7 +756,7 @@ bool NtripClient::readResponseHeaders(int socket_fd, std::string& headers)
         std::lock_guard<std::mutex> lock(mutex_);
         last_failure_category_ = FailureCategory::Transport;
       }
-      setStatus("failed to read response headers");
+      setStatus(StatusCode::TransportHeaderFailed, "failed to read response headers");
       return false;
     }
     headers.append(buffer.data(), static_cast<std::size_t>(received));
@@ -766,7 +766,7 @@ bool NtripClient::readResponseHeaders(int socket_fd, std::string& headers)
         std::lock_guard<std::mutex> lock(mutex_);
         last_failure_category_ = FailureCategory::Service;
       }
-      setStatus(std::string("response headers exceeded 8KB: ") +
+      setStatus(StatusCode::ProtocolError, std::string("response headers exceeded 8KB: ") +
                 sanitizeSnippet(headers, 200U));
       return false;
     }
@@ -779,7 +779,7 @@ bool NtripClient::readResponseHeaders(int socket_fd, std::string& headers)
       std::lock_guard<std::mutex> lock(mutex_);
       last_failure_category_ = FailureCategory::Service;
     }
-    setStatus("incomplete response headers");
+    setStatus(StatusCode::ProtocolError, "incomplete response headers");
     return false;
   }
 
@@ -793,44 +793,44 @@ bool NtripClient::readResponseHeaders(int socket_fd, std::string& headers)
     }
     if (containsAny(header_block, {"SOURCETABLE 200 OK"}))
     {
-      setStatus("received sourcetable response; mountpoint is likely invalid");
+      setStatus(StatusCode::MountpointInvalid, "received sourcetable response; mountpoint is likely invalid");
     }
     else if (containsAny(header_block, {"401"}))
     {
-      setStatus("received unauthorized response; check username, password, and mountpoint");
+      setStatus(StatusCode::AuthFailed, "received unauthorized response; check username, password, and mountpoint");
     }
     else if (containsAny(header_block, {"403"}))
     {
-      setStatus("received forbidden response; account or client is not allowed to access this stream");
+      setStatus(StatusCode::AccessForbidden, "received forbidden response; account or client is not allowed to access this stream");
     }
     else if (containsAny(header_block, {"404"}))
     {
-      setStatus("received not-found response; mountpoint or path is likely invalid");
+      setStatus(StatusCode::MountpointInvalid, "received not-found response; mountpoint or path is likely invalid");
     }
     else if (containsAny(header_block, {"429"}))
     {
-      setStatus("received too-many-requests response; caster is rate limiting this client");
+      setStatus(StatusCode::RateLimited, "received too-many-requests response; caster is rate limiting this client");
     }
     else if (containsAny(header_block, {"502"}))
     {
-      setStatus("received bad-gateway response; upstream caster path is unhealthy");
+      setStatus(StatusCode::UpstreamError, "received bad-gateway response; upstream caster path is unhealthy");
     }
     else if (containsAny(header_block, {"503"}))
     {
-      setStatus("received service-unavailable response; caster is temporarily unavailable");
+      setStatus(StatusCode::ServiceUnavailable, "received service-unavailable response; caster is temporarily unavailable");
     }
     else if (containsAny(header_block, {"504"}))
     {
-      setStatus("received gateway-timeout response; upstream caster path timed out");
+      setStatus(StatusCode::UpstreamError, "received gateway-timeout response; upstream caster path timed out");
     }
     else if (config_.ntrip_version.empty())
     {
-      setStatus(std::string("unexpected response; Ntrip-Version was not specified: ") +
+      setStatus(StatusCode::ProtocolError, std::string("unexpected response; Ntrip-Version was not specified: ") +
                 sanitizeSnippet(header_block, 200U));
     }
     else
     {
-      setStatus(std::string("unexpected response: ") +
+      setStatus(StatusCode::ProtocolError, std::string("unexpected response: ") +
                 sanitizeSnippet(header_block, 200U));
     }
     return false;
@@ -845,7 +845,7 @@ bool NtripClient::readResponseHeaders(int socket_fd, std::string& headers)
     dispatchRtcmFrames();
   }
 
-  setStatus("caster accepted stream");
+  setStatus(StatusCode::SessionAccepted, "caster accepted stream");
 
   if (config_.send_initial_gga)
   {
@@ -886,7 +886,7 @@ bool NtripClient::streamData(int socket_fd)
           std::ostringstream msg;
           msg << "RTCM data not received for " << std::fixed << std::setprecision(2)
               << config_.rtcm_timeout_sec << " seconds";
-          setStatus(msg.str());
+          setStatus(StatusCode::RtcmTimeout, msg.str());
           return false;
         }
       }
@@ -902,7 +902,7 @@ bool NtripClient::streamData(int socket_fd)
           std::ostringstream msg;
           msg << "RTCM stream did not start within " << std::fixed << std::setprecision(2)
               << config_.session_start_timeout_sec << " seconds";
-          setStatus(msg.str());
+          setStatus(StatusCode::SessionStartTimeout, msg.str());
           return false;
         }
       }
@@ -926,7 +926,7 @@ bool NtripClient::streamData(int socket_fd)
             std::lock_guard<std::mutex> lock(mutex_);
             last_failure_category_ = FailureCategory::Service;
           }
-          setStatus("caster accepted session but closed before sending any stream data");
+          setStatus(StatusCode::SessionEmpty, "caster accepted session but closed before sending any stream data");
         }
         else
         {
@@ -934,7 +934,7 @@ bool NtripClient::streamData(int socket_fd)
             std::lock_guard<std::mutex> lock(mutex_);
             last_failure_category_ = FailureCategory::Service;
           }
-          setStatus("caster accepted session but no valid RTCM frames were received before close");
+          setStatus(StatusCode::SessionNoValidRtcm, "caster accepted session but no valid RTCM frames were received before close");
         }
       }
       else
@@ -943,7 +943,7 @@ bool NtripClient::streamData(int socket_fd)
           std::lock_guard<std::mutex> lock(mutex_);
           last_failure_category_ = FailureCategory::Transport;
         }
-        setStatus("caster closed the connection");
+        setStatus(StatusCode::StreamClosed, "caster closed the connection");
       }
       return false;
     }
@@ -953,7 +953,7 @@ bool NtripClient::streamData(int socket_fd)
         std::lock_guard<std::mutex> lock(mutex_);
         last_failure_category_ = FailureCategory::Transport;
       }
-      setStatus("stream read failed");
+      setStatus(StatusCode::ReadFailed, "stream read failed");
       return false;
     }
 
@@ -1009,7 +1009,7 @@ ssize_t NtripClient::readSome(int socket_fd, void* buffer, std::size_t buffer_si
         return kReadTimeoutResult;
       }
 
-      setStatus(std::string("TLS read failed: ") + currentSslError());
+      setStatus(StatusCode::ReadFailed, std::string("TLS read failed: ") + currentSslError());
       return -1;
     }
     return -1;
@@ -1030,7 +1030,7 @@ ssize_t NtripClient::readSome(int socket_fd, void* buffer, std::size_t buffer_si
     {
       return kReadTimeoutResult;
     }
-    setStatus(std::string("socket read failed: ") + std::strerror(errno));
+    setStatus(StatusCode::ReadFailed, std::string("socket read failed: ") + std::strerror(errno));
     return -1;
   }
 
@@ -1052,7 +1052,7 @@ void NtripClient::processRtcmBytes(const std::uint8_t* data, std::size_t size)
   rtcm_buffer_.insert(rtcm_buffer_.end(), data, data + size);
   if (rtcm_buffer_.size() > kMaxRtcmBufferSize)
   {
-    setStatus("RTCM parser buffer exceeded 10KB; trimming");
+    setStatus(StatusCode::RtcmBufferTrimmed, "RTCM parser buffer exceeded 10KB; trimming");
     const std::size_t trimmed = rtcm_buffer_.size() - kMaxRtcmBufferSize;
     {
       std::lock_guard<std::mutex> lock(mutex_);
@@ -1089,12 +1089,12 @@ bool NtripClient::dispatchRtcmFrames()
     if (emit_stream_active)
     {
       resetFailureTracking();
-      setStatus("successful stream established; reconnect state reset");
+      setStatus(StatusCode::StreamRecovered, "successful stream established; reconnect state reset");
       {
         std::lock_guard<std::mutex> lock(mutex_);
         reconnect_state_reset_for_session_ = true;
       }
-      setStatus("RTCM stream active");
+      setStatus(StatusCode::StreamActive, "RTCM stream active");
     }
     published = true;
   }
@@ -1192,7 +1192,7 @@ bool NtripClient::extractRtcmFrame(std::vector<std::uint8_t>& frame)
         computeRtcmChecksum(rtcm_buffer_.data(), packet_length - 3U);
     if (expected_checksum != actual_checksum)
     {
-      setStatus("discarding RTCM packet with invalid CRC");
+      setStatus(StatusCode::RtcmCrcError, "discarding RTCM packet with invalid CRC");
       {
         std::lock_guard<std::mutex> lock(mutex_);
         counters_.crc_failures += 1U;
@@ -1248,7 +1248,7 @@ ssize_t NtripClient::writeSome(int socket_fd, const void* buffer, std::size_t bu
         continue;
       }
 
-      setStatus(std::string("TLS write failed: ") + currentSslError());
+      setStatus(StatusCode::ReadFailed, std::string("TLS write failed: ") + currentSslError());
       return -1;
     }
     return -1;
@@ -1265,7 +1265,7 @@ ssize_t NtripClient::writeSome(int socket_fd, const void* buffer, std::size_t bu
     {
       continue;
     }
-    setStatus(std::string("socket write failed: ") + std::strerror(errno));
+    setStatus(StatusCode::ReadFailed, std::string("socket write failed: ") + std::strerror(errno));
     return -1;
   }
 
@@ -1342,11 +1342,11 @@ double NtripClient::computeTransportBackoffDelaySec(int attempt_number) const
   return std::max(0.0, bounded_delay * jitter(generator));
 }
 
-void NtripClient::setStatus(const std::string& status) const
+void NtripClient::setStatus(StatusCode code, const std::string& status) const
 {
   if (status_callback_)
   {
-    status_callback_(status);
+    status_callback_(StatusEvent{code, status});
   }
 }
 

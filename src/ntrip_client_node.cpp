@@ -16,143 +16,40 @@
 namespace
 {
 
-std::string statusCodeForMessage(const std::string& message)
+std::string statusCodeToString(ros_ntrip_client::StatusCode code)
 {
-  if (message.find("connection attempt") == 0)
+  switch (code)
   {
-    return "CONNECTING";
-  }
-  if (message == "connected to caster")
-  {
-    return "TCP_CONNECTED";
-  }
-  if (message == "TLS session established")
-  {
-    return "TLS_ESTABLISHED";
-  }
-  if (message == "request sent")
-  {
-    return "REQUEST_SENT";
-  }
-  if (message == "caster accepted stream")
-  {
-    return "SESSION_ACCEPTED";
-  }
-  if (message == "RTCM stream active")
-  {
-    return "STREAM_ACTIVE";
-  }
-  if (message.find("received unauthorized response") == 0)
-  {
-    return "AUTH_FAILED";
-  }
-  if (message.find("received forbidden response") == 0)
-  {
-    return "ACCESS_FORBIDDEN";
-  }
-  if (message.find("received not-found response") == 0 ||
-      message.find("received sourcetable response") == 0)
-  {
-    return "MOUNTPOINT_INVALID";
-  }
-  if (message.find("received too-many-requests response") == 0)
-  {
-    return "RATE_LIMITED";
-  }
-  if (message.find("received service-unavailable response") == 0)
-  {
-    return "SERVICE_UNAVAILABLE";
-  }
-  if (message.find("received bad-gateway response") == 0 ||
-      message.find("received gateway-timeout response") == 0)
-  {
-    return "UPSTREAM_ERROR";
-  }
-  if (message.find("DNS resolution failed") == 0)
-  {
-    return "DNS_FAILED";
-  }
-  if (message.find("unable to connect to any resolved address") == 0)
-  {
-    return "CONNECT_FAILED";
-  }
-  if (message.find("failed to send NTRIP request") == 0)
-  {
-    return "REQUEST_FAILED";
-  }
-  if (message.find("timed out waiting for caster response headers") == 0 ||
-      message.find("caster closed the connection before sending response headers") == 0)
-  {
-    return "TRANSPORT_HEADER_FAILED";
-  }
-  if (message.find("failed to read response headers") == 0 ||
-      message.find("incomplete response headers") == 0 ||
-      message.find("response headers exceeded") == 0 ||
-      message.find("unexpected response") == 0)
-  {
-    return "PROTOCOL_ERROR";
-  }
-  if (message.find("TLS handshake failed") == 0 ||
-      message.find("TLS peer certificate verification failed") == 0 ||
-      message.find("failed to create TLS context") == 0 ||
-      message.find("failed to create TLS session") == 0 ||
-      message.find("failed to load CA bundle") == 0 ||
-      message.find("failed to load system CA bundle") == 0 ||
-      message.find("failed to load client certificate") == 0 ||
-      message.find("failed to load client private key") == 0 ||
-      message.find("both tls_client_cert_file and tls_client_key_file are required for mTLS") == 0 ||
-      message.find("client certificate and private key do not match") == 0)
-  {
-    return "TLS_ERROR";
-  }
-  if (message.find("RTCM data not received for") == 0)
-  {
-    return "RTCM_TIMEOUT";
-  }
-  if (message.find("RTCM stream did not start within") == 0)
-  {
-    return "SESSION_START_TIMEOUT";
-  }
-  if (message == "caster closed the connection")
-  {
-    return "STREAM_CLOSED";
-  }
-  if (message == "caster accepted session but closed before sending any stream data")
-  {
-    return "SESSION_EMPTY";
-  }
-  if (message == "caster accepted session but no valid RTCM frames were received before close")
-  {
-    return "SESSION_NO_VALID_RTCM";
-  }
-  if (message.find("stream disconnected, backing off for") == 0 ||
-      message.find("connect failed, backing off for") == 0 ||
-      message.find("transport connect failed, backing off for") == 0 ||
-      message.find("transport stream disconnected, backing off for") == 0)
-  {
-    return "BACKOFF";
-  }
-  if (message == "successful stream established; reconnect state reset")
-  {
-    return "STREAM_RECOVERED";
-  }
-  if (message.find("stream read failed") == 0 ||
-      message.find("socket read failed") == 0 ||
-      message.find("TLS read failed") == 0)
-  {
-    return "READ_FAILED";
-  }
-  if (message == "maximum connection attempts reached")
-  {
-    return "STOPPED_MAX_ATTEMPTS";
-  }
-  if (message.find("discarding RTCM packet with invalid CRC") == 0)
-  {
-    return "RTCM_CRC_ERROR";
-  }
-  if (message.find("RTCM parser buffer exceeded") == 0)
-  {
-    return "RTCM_BUFFER_TRIMMED";
+    case ros_ntrip_client::StatusCode::Connecting: return "CONNECTING";
+    case ros_ntrip_client::StatusCode::TcpConnected: return "TCP_CONNECTED";
+    case ros_ntrip_client::StatusCode::TlsEstablished: return "TLS_ESTABLISHED";
+    case ros_ntrip_client::StatusCode::RequestSent: return "REQUEST_SENT";
+    case ros_ntrip_client::StatusCode::SessionAccepted: return "SESSION_ACCEPTED";
+    case ros_ntrip_client::StatusCode::StreamActive: return "STREAM_ACTIVE";
+    case ros_ntrip_client::StatusCode::AuthFailed: return "AUTH_FAILED";
+    case ros_ntrip_client::StatusCode::AccessForbidden: return "ACCESS_FORBIDDEN";
+    case ros_ntrip_client::StatusCode::MountpointInvalid: return "MOUNTPOINT_INVALID";
+    case ros_ntrip_client::StatusCode::RateLimited: return "RATE_LIMITED";
+    case ros_ntrip_client::StatusCode::ServiceUnavailable: return "SERVICE_UNAVAILABLE";
+    case ros_ntrip_client::StatusCode::UpstreamError: return "UPSTREAM_ERROR";
+    case ros_ntrip_client::StatusCode::DnsFailed: return "DNS_FAILED";
+    case ros_ntrip_client::StatusCode::ConnectFailed: return "CONNECT_FAILED";
+    case ros_ntrip_client::StatusCode::RequestFailed: return "REQUEST_FAILED";
+    case ros_ntrip_client::StatusCode::TransportHeaderFailed: return "TRANSPORT_HEADER_FAILED";
+    case ros_ntrip_client::StatusCode::ProtocolError: return "PROTOCOL_ERROR";
+    case ros_ntrip_client::StatusCode::TlsError: return "TLS_ERROR";
+    case ros_ntrip_client::StatusCode::SessionStartTimeout: return "SESSION_START_TIMEOUT";
+    case ros_ntrip_client::StatusCode::RtcmTimeout: return "RTCM_TIMEOUT";
+    case ros_ntrip_client::StatusCode::StreamClosed: return "STREAM_CLOSED";
+    case ros_ntrip_client::StatusCode::SessionEmpty: return "SESSION_EMPTY";
+    case ros_ntrip_client::StatusCode::SessionNoValidRtcm: return "SESSION_NO_VALID_RTCM";
+    case ros_ntrip_client::StatusCode::Backoff: return "BACKOFF";
+    case ros_ntrip_client::StatusCode::StreamRecovered: return "STREAM_RECOVERED";
+    case ros_ntrip_client::StatusCode::ReadFailed: return "READ_FAILED";
+    case ros_ntrip_client::StatusCode::StoppedMaxAttempts: return "STOPPED_MAX_ATTEMPTS";
+    case ros_ntrip_client::StatusCode::RtcmCrcError: return "RTCM_CRC_ERROR";
+    case ros_ntrip_client::StatusCode::RtcmBufferTrimmed: return "RTCM_BUFFER_TRIMMED";
+    case ros_ntrip_client::StatusCode::Info: return "INFO";
   }
   return "INFO";
 }
@@ -296,17 +193,17 @@ int main(int argc, char** argv)
   ros_ntrip_client::NtripClient client(config);
   auto latest_gga = std::make_shared<std::string>();
 
-  auto publish_status = [&](const std::string& message)
+  auto publish_status = [&](const ros_ntrip_client::StatusEvent& event)
   {
     std_msgs::String status_msg;
-    status_msg.data = message;
+    status_msg.data = event.message;
     status_pub.publish(status_msg);
 
     std_msgs::String status_code_msg;
-    status_code_msg.data = statusCodeForMessage(message);
+    status_code_msg.data = statusCodeToString(event.code);
     status_code_pub.publish(status_code_msg);
 
-    ROS_INFO_STREAM_THROTTLE(5.0, "NTRIP: " << message);
+    ROS_INFO_STREAM_THROTTLE(5.0, "NTRIP: " << event.message);
   };
 
   auto publish_counters = [&]()
