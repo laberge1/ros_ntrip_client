@@ -23,6 +23,7 @@
 #include <cstdlib>
 #include <functional>
 #include <mutex>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -1264,6 +1265,118 @@ TEST(NtripClientTest, CanRestartAfterStopFromStatusCallback)
       [](const std::vector<std::uint8_t>&) {},
       [](const ros_ntrip_client::StatusEvent&) {}));
   client.stop();
+}
+
+TEST(NtripClientTest, CanDestroyClientFromStatusCallback)
+{
+  NtripClientConfig config = makeConfig(65005);
+  config.max_attempts = 1;
+  config.transport_reconnect_initial_delay_sec = 0.01;
+  config.transport_reconnect_max_delay_sec = 0.01;
+
+  auto client = std::make_unique<NtripClient>(config);
+  std::mutex code_mutex;
+  std::vector<StatusCode> codes;
+
+  ASSERT_TRUE(client->start(
+      [](const std::vector<std::uint8_t>&) {},
+      [&, client_holder = &client](const ros_ntrip_client::StatusEvent& status)
+      {
+        {
+          std::lock_guard<std::mutex> lock(code_mutex);
+          codes.push_back(status.code);
+        }
+        if (status.code == StatusCode::StoppedMaxAttempts)
+        {
+          client_holder->reset();
+        }
+      }));
+
+  ASSERT_TRUE(waitForPredicate([&]()
+                               {
+                                 const std::vector<StatusCode> copied =
+                                     copyStatusCodes(codes, code_mutex);
+                                 return containsStatusCode(copied, StatusCode::StoppedMaxAttempts);
+                               },
+                               std::chrono::milliseconds(5000)));
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+}
+
+TEST(NtripClientTest, StatusCallbackExceptionsDoNotTerminateClient)
+{
+  NtripClientConfig config = makeConfig(65006);
+  config.max_attempts = 1;
+  config.transport_reconnect_initial_delay_sec = 0.01;
+  config.transport_reconnect_max_delay_sec = 0.01;
+  NtripClient client(config);
+
+  std::atomic<int> status_callback_calls{0};
+
+  ASSERT_TRUE(client.start(
+      [](const std::vector<std::uint8_t>&) {},
+      [&](const ros_ntrip_client::StatusEvent&)
+      {
+        ++status_callback_calls;
+        throw std::runtime_error("status callback failure");
+      }));
+
+  ASSERT_TRUE(waitForPredicate([&]()
+                               { return status_callback_calls.load() > 0; },
+                               std::chrono::milliseconds(5000)));
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  client.stop();
+
+  EXPECT_GT(status_callback_calls.load(), 0);
+}
+
+TEST(NtripClientTest, DataCallbackExceptionsDoNotTerminateClient)
+{
+  MockCaster caster([](int client_fd)
+                    {
+                      (void)readRequest(client_fd);
+                      const std::string response = "ICY 200 OK\r\n";
+                      ASSERT_EQ(send(client_fd, response.data(), response.size(), 0),
+                                static_cast<ssize_t>(response.size()));
+                      ASSERT_EQ(send(client_fd, kMinimalRtcmFrame.data(), kMinimalRtcmFrame.size(), 0),
+                                static_cast<ssize_t>(kMinimalRtcmFrame.size()));
+                      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    });
+
+  NtripClientConfig config = makeConfig(caster.port());
+  NtripClient client(config);
+  std::atomic<int> data_callback_calls{0};
+  std::mutex code_mutex;
+  std::vector<StatusCode> codes;
+
+  ASSERT_TRUE(client.start(
+      [&](const std::vector<std::uint8_t>&)
+      {
+        ++data_callback_calls;
+        throw std::runtime_error("data callback failure");
+      },
+      [&](const ros_ntrip_client::StatusEvent& status)
+      {
+        std::lock_guard<std::mutex> lock(code_mutex);
+        codes.push_back(status.code);
+      }));
+
+  ASSERT_TRUE(waitForPredicate([&]()
+                               { return data_callback_calls.load() > 0; },
+                               std::chrono::milliseconds(5000)));
+  ASSERT_TRUE(waitForPredicate([&]()
+                               {
+                                 const std::vector<StatusCode> copied =
+                                     copyStatusCodes(codes, code_mutex);
+                                 return containsStatusCode(copied, StatusCode::StreamActive);
+                               },
+                               std::chrono::milliseconds(5000)));
+
+  client.stop();
+  caster.stop();
+
+  EXPECT_GT(data_callback_calls.load(), 0);
 }
 
 TEST(NtripClientTest, StartReturnsFalseImmediatelyWhenAlreadyRunning)

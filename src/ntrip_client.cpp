@@ -21,6 +21,7 @@ namespace
 {
 constexpr std::size_t kMaxRtcmBufferSize = 10240U;
 constexpr ssize_t kReadTimeoutResult = -2;
+constexpr std::size_t kMaxCallbackQueueSize = 256U;
 }  // namespace
 
 NtripClient::NtripClient(NtripClientConfig config)
@@ -37,6 +38,8 @@ NtripClient::~NtripClient()
 
 bool NtripClient::start(DataCallback data_callback, StatusCallback status_callback)
 {
+  std::lock_guard<std::mutex> lifecycle_lock(lifecycle_mutex_);
+
   if (!data_callback)
   {
     setStatus(StatusCode::Info, "refusing to start without a data callback");
@@ -72,14 +75,32 @@ bool NtripClient::start(DataCallback data_callback, StatusCallback status_callba
     return false;
   }
 
-  data_callback_ = std::move(data_callback);
-  status_callback_ = std::move(status_callback);
-  worker_thread_ = std::thread(&NtripClient::workerLoop, this);
+  try
+  {
+    startCallbackDispatcher(std::move(data_callback), std::move(status_callback));
+    try
+    {
+      worker_thread_ = std::thread(&NtripClient::workerLoop, this);
+    }
+    catch (...)
+    {
+      running_ = false;
+      stopCallbackDispatcher();
+      throw;
+    }
+  }
+  catch (...)
+  {
+    running_ = false;
+    throw;
+  }
   return true;
 }
 
 void NtripClient::stop()
 {
+  std::lock_guard<std::mutex> lifecycle_lock(lifecycle_mutex_);
+
   const bool was_running = running_.exchange(false);
   const bool called_from_worker =
       worker_thread_.joinable() && std::this_thread::get_id() == worker_thread_.get_id();
@@ -112,6 +133,7 @@ void NtripClient::stop()
     transport = detachActiveTransportLocked();
   }
   cleanupDetachedTransport(transport);
+  stopCallbackDispatcher();
 }
 
 void NtripClient::updateGgaSentence(const std::string& gga_sentence)
@@ -344,6 +366,94 @@ void NtripClient::notifyWorker()
   const std::uint8_t byte = 0x01U;
   const ssize_t rc = write(wake_pipe_write_fd_, &byte, sizeof(byte));
   (void)rc;
+}
+
+void NtripClient::startCallbackDispatcher(DataCallback data_callback, StatusCallback status_callback)
+{
+  stopCallbackDispatcher();
+
+  auto dispatcher = std::make_shared<CallbackDispatcherState>();
+  dispatcher->data_callback = std::move(data_callback);
+  dispatcher->status_callback = std::move(status_callback);
+  dispatcher->thread = std::thread(&NtripClient::callbackLoop, dispatcher);
+  std::atomic_store(&callback_dispatcher_, std::move(dispatcher));
+}
+
+void NtripClient::stopCallbackDispatcher()
+{
+  std::shared_ptr<CallbackDispatcherState> dispatcher =
+      std::atomic_exchange(&callback_dispatcher_, std::shared_ptr<CallbackDispatcherState>{});
+  if (!dispatcher)
+  {
+    return;
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(dispatcher->mutex);
+    dispatcher->stopping = true;
+  }
+  dispatcher->cv.notify_all();
+
+  if (!dispatcher->thread.joinable())
+  {
+    return;
+  }
+
+  if (std::this_thread::get_id() == dispatcher->thread.get_id())
+  {
+    dispatcher->thread.detach();
+    return;
+  }
+
+  dispatcher->thread.join();
+}
+
+void NtripClient::callbackLoop(std::shared_ptr<CallbackDispatcherState> dispatcher)
+{
+  while (true)
+  {
+    CallbackItem item;
+    {
+      std::unique_lock<std::mutex> lock(dispatcher->mutex);
+      dispatcher->cv.wait(lock, [&]()
+                          { return dispatcher->stopping || !dispatcher->queue.empty(); });
+      if (dispatcher->queue.empty())
+      {
+        if (dispatcher->stopping)
+        {
+          return;
+        }
+        continue;
+      }
+      item = std::move(dispatcher->queue.front());
+      dispatcher->queue.pop_front();
+      dispatcher->cv.notify_all();
+    }
+
+    if (item.is_status)
+    {
+      if (dispatcher->status_callback)
+      {
+        try
+        {
+          dispatcher->status_callback(item.status);
+        }
+        catch (...)
+        {
+        }
+      }
+    }
+    else if (dispatcher->data_callback)
+    {
+      try
+      {
+        dispatcher->data_callback(item.data);
+      }
+      catch (...)
+      {
+      }
+    }
+  }
 }
 
 void NtripClient::drainWakePipe()
@@ -698,12 +808,52 @@ double NtripClient::computeTransportBackoffDelaySec(int attempt_number) const
   return std::max(0.0, bounded_delay * jitter(generator));
 }
 
+void NtripClient::enqueueDataCallback(std::vector<std::uint8_t> data) const
+{
+  const std::shared_ptr<CallbackDispatcherState> dispatcher = std::atomic_load(&callback_dispatcher_);
+  if (!dispatcher)
+  {
+    return;
+  }
+
+  {
+    std::unique_lock<std::mutex> lock(dispatcher->mutex);
+    dispatcher->cv.wait(lock, [&]()
+                        {
+                          return dispatcher->stopping || !running_ ||
+                                 dispatcher->queue.size() < kMaxCallbackQueueSize;
+                        });
+    if (dispatcher->stopping || !running_)
+    {
+      return;
+    }
+    dispatcher->queue.push_back(CallbackItem{false, std::move(data), StatusEvent{}});
+  }
+  dispatcher->cv.notify_one();
+}
+
 void NtripClient::setStatus(StatusCode code, const std::string& status) const
 {
-  if (status_callback_)
+  const std::shared_ptr<CallbackDispatcherState> dispatcher = std::atomic_load(&callback_dispatcher_);
+  if (!dispatcher || !dispatcher->status_callback)
   {
-    status_callback_(StatusEvent{code, status});
+    return;
   }
+
+  {
+    std::unique_lock<std::mutex> lock(dispatcher->mutex);
+    dispatcher->cv.wait(lock, [&]()
+                        {
+                          return dispatcher->stopping || !running_ ||
+                                 dispatcher->queue.size() < kMaxCallbackQueueSize;
+                        });
+    if (dispatcher->stopping || !running_)
+    {
+      return;
+    }
+    dispatcher->queue.push_back(CallbackItem{true, {}, StatusEvent{code, status}});
+  }
+  dispatcher->cv.notify_one();
 }
 
 }  // namespace ros_ntrip_client

@@ -80,7 +80,7 @@ bool NtripClient::dispatchRtcmFrames()
   std::vector<std::uint8_t> frame;
   while (extractRtcmFrame(frame))
   {
-    data_callback_(frame);
+    enqueueDataCallback(frame);
     bool emit_stream_active = false;
     {
       std::lock_guard<std::mutex> lock(mutex_);

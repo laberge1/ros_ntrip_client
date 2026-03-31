@@ -2,9 +2,11 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -125,6 +127,24 @@ public:
   NtripClientCounters getCounters() const;
 
 private:
+  struct CallbackItem
+  {
+    bool is_status = false;
+    std::vector<std::uint8_t> data;
+    StatusEvent status;
+  };
+
+  struct CallbackDispatcherState
+  {
+    std::mutex mutex;
+    std::condition_variable cv;
+    std::deque<CallbackItem> queue;
+    DataCallback data_callback;
+    StatusCallback status_callback;
+    bool stopping = false;
+    std::thread thread;
+  };
+
   struct TransportState
   {
     int socket_fd = -1;
@@ -172,6 +192,9 @@ private:
   void closeWakePipe();
   void notifyWorker();
   void drainWakePipe();
+  void startCallbackDispatcher(DataCallback data_callback, StatusCallback status_callback);
+  void stopCallbackDispatcher();
+  static void callbackLoop(std::shared_ptr<CallbackDispatcherState> dispatcher);
   bool hasPendingTlsReadData(int socket_fd) const;
   bool sendQueuedGgaIfNeeded(int socket_fd);
   ssize_t readSome(int socket_fd, void* buffer, std::size_t buffer_size);
@@ -188,12 +211,11 @@ private:
   bool sendRaw(int socket_fd, const std::string& bytes);
   double computeBackoffDelaySec(int attempt_number) const;
   double computeTransportBackoffDelaySec(int attempt_number) const;
+  void enqueueDataCallback(std::vector<std::uint8_t> data) const;
   void setStatus(StatusCode code, const std::string& status) const;
 
   NtripClientConfig config_;
-  DataCallback data_callback_;
-  StatusCallback status_callback_;
-
+  mutable std::mutex lifecycle_mutex_;
   mutable std::mutex mutex_;
   std::thread worker_thread_;
   std::atomic<bool> running_{false};
@@ -201,6 +223,7 @@ private:
   TransportState transport_;
   SessionState session_;
   ReconnectState reconnect_;
+  std::shared_ptr<CallbackDispatcherState> callback_dispatcher_;
   int wake_pipe_read_fd_{-1};
   int wake_pipe_write_fd_{-1};
 };
