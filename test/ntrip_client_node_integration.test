@@ -3,7 +3,7 @@
         type="mock_ntrip_caster.py"
         name="mock_ntrip_caster"
         output="screen"
-        args="--host 127.0.0.1 --port 2110 --interval-sec 0.2" />
+        args="--host 127.0.0.1 --port 2110 --interval-sec 0.2 --capture-file /tmp/ros_ntrip_client_node_integration_gga.log" />
 
   <node pkg="ros_ntrip_client"
         type="ntrip_client_node"
@@ -21,6 +21,12 @@
     <param name="transport_reconnect_max_delay_sec" value="0.2" />
     <param name="adaptive_reconnect" value="false" />
     <param name="rtcm_frame_id" value="odom" />
+    <param name="use_fixed_gga_position" value="true" />
+    <param name="fixed_latitude_deg" value="53.2724" />
+    <param name="fixed_longitude_deg" value="-9.0539" />
+    <param name="fixed_altitude_m" value="12.0" />
+    <param name="send_initial_gga" value="true" />
+    <param name="gga_send_interval_sec" value="0.5" />
   </node>
 
   <test test-name="ntrip_client_node_integration"

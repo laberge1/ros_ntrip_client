@@ -1,4 +1,6 @@
+#define private public
 #include "ros_ntrip_client/ntrip_client.h"
+#undef private
 
 #include <gtest/gtest.h>
 
@@ -1083,6 +1085,55 @@ TEST(NtripClientTest, AdaptiveBurstMinimumDelayOverridesServiceBackoff)
   EXPECT_GE(backoff_seconds, 0.70);
 }
 
+TEST(NtripClientTest, AdaptiveSlowIntervalOverridesServiceBackoff)
+{
+  MockCaster caster([](int client_fd)
+                    {
+                      (void)readRequest(client_fd);
+                      const std::string response = "ICY 200 OK\r\n";
+                      ASSERT_EQ(send(client_fd, response.data(), response.size(), 0),
+                                static_cast<ssize_t>(response.size()));
+                      std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                    });
+
+  NtripClientConfig config = makeConfig(caster.port());
+  config.max_attempts = 1;
+  config.session_start_timeout_sec = 0.05;
+  config.adaptive_reconnect = true;
+  config.adaptive_burst_max_attempts = 100;
+  config.adaptive_slow_after_sec = 0.0;
+  config.adaptive_slow_interval_sec = 0.8;
+  config.reconnect_initial_delay_sec = 0.1;
+  config.reconnect_max_delay_sec = 0.1;
+  NtripClient client(config);
+
+  std::mutex status_mutex;
+  std::vector<std::string> statuses;
+
+  ASSERT_TRUE(client.start(
+      [](const std::vector<std::uint8_t>&) {},
+      [&](const ros_ntrip_client::StatusEvent& status)
+      {
+        std::lock_guard<std::mutex> lock(status_mutex);
+        statuses.push_back(status.message);
+      }));
+
+  ASSERT_TRUE(waitForPredicate([&]()
+                               {
+                                 const std::vector<std::string> copied =
+                                     copyStatuses(statuses, status_mutex);
+                                 return containsStatus(copied, "stream disconnected, backing off for");
+                               }));
+
+  client.stop();
+  caster.stop();
+
+  const std::vector<std::string> copied_statuses = copyStatuses(statuses, status_mutex);
+  const double backoff_seconds = latestBackoffSeconds(copied_statuses);
+  EXPECT_GE(backoff_seconds, 0.70);
+  EXPECT_LE(backoff_seconds, 0.90);
+}
+
 TEST(NtripClientTest, ReportsTlsHandshakeFailureAgainstPlainTcpCaster)
 {
   MockCaster caster([](int client_fd)
@@ -1171,4 +1222,68 @@ TEST(NtripClientTest, RejectsPartialMtlsConfiguration)
 
   const std::vector<StatusCode> copied_codes = copyStatusCodes(codes, code_mutex);
   EXPECT_TRUE(containsStatusCode(copied_codes, StatusCode::TlsError));
+}
+
+TEST(NtripClientTest, CountsRtcmCrcFailures)
+{
+  MockCaster caster([](int client_fd)
+                    {
+                      (void)readRequest(client_fd);
+                      const std::string response = "ICY 200 OK\r\n";
+                      const std::vector<std::uint8_t> invalid_frame = {0xD3, 0x00, 0x00, 0x00, 0x00, 0x00};
+                      ASSERT_EQ(send(client_fd, response.data(), response.size(), 0),
+                                static_cast<ssize_t>(response.size()));
+                      ASSERT_EQ(send(client_fd,
+                                     invalid_frame.data(),
+                                     invalid_frame.size(),
+                                     0),
+                                static_cast<ssize_t>(invalid_frame.size()));
+                      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                    });
+
+  NtripClientConfig config = makeConfig(caster.port());
+  NtripClient client(config);
+
+  std::mutex status_mutex;
+  std::vector<std::string> statuses;
+  std::mutex code_mutex;
+  std::vector<StatusCode> codes;
+
+  ASSERT_TRUE(client.start(
+      [](const std::vector<std::uint8_t>&) {},
+      [&](const ros_ntrip_client::StatusEvent& status)
+      {
+        std::lock_guard<std::mutex> lock(status_mutex);
+        statuses.push_back(status.message);
+        std::lock_guard<std::mutex> code_lock(code_mutex);
+        codes.push_back(status.code);
+      }));
+
+  ASSERT_TRUE(waitForPredicate([&]()
+                               {
+                                 const std::vector<StatusCode> copied =
+                                     copyStatusCodes(codes, code_mutex);
+                                 return containsStatusCode(copied, StatusCode::RtcmCrcError);
+                               }));
+
+  client.stop();
+  caster.stop();
+
+  const ros_ntrip_client::NtripClientCounters counters = client.getCounters();
+  EXPECT_GE(counters.crc_failures, 1U);
+  EXPECT_GE(counters.discarded_bytes, 1U);
+}
+
+TEST(NtripClientTest, CountsBufferTrimmedBytes)
+{
+  NtripClientConfig config = makeConfig(0);
+  NtripClient client(config);
+
+  const std::string payload(20000, 'A');
+  client.processRtcmBytes(
+      reinterpret_cast<const std::uint8_t*>(payload.data()), payload.size());
+
+  const ros_ntrip_client::NtripClientCounters counters = client.getCounters();
+  EXPECT_GT(counters.buffer_trimmed_bytes, 0U);
+  EXPECT_GT(counters.discarded_bytes, 0U);
 }
