@@ -648,7 +648,6 @@ public:
                                    if (SSL_accept(ssl) == 1)
                                    {
                                      handler_(ssl);
-                                     SSL_shutdown(ssl);
                                    }
 
                                    SSL_free(ssl);
@@ -1186,6 +1185,205 @@ TEST(NtripClientTest, MaxAttemptsAppliesToRepeatedTransportFailures)
   const std::vector<std::string> copied_statuses = copyStatuses(statuses, status_mutex);
   EXPECT_EQ(countStatuses(copied_statuses, "connection attempt "), 2U);
   EXPECT_TRUE(containsStatus(copied_statuses, "maximum connection attempts reached"));
+}
+
+TEST(NtripClientTest, StopFromStatusCallbackDoesNotDeadlockAtMaxAttempts)
+{
+  NtripClientConfig config = makeConfig(65003);
+  config.max_attempts = 1;
+  config.transport_reconnect_initial_delay_sec = 0.01;
+  config.transport_reconnect_max_delay_sec = 0.01;
+  NtripClient client(config);
+  NtripClient* client_ptr = &client;
+
+  std::mutex code_mutex;
+  std::vector<StatusCode> codes;
+
+  ASSERT_TRUE(client.start(
+      [](const std::vector<std::uint8_t>&) {},
+      [&](const ros_ntrip_client::StatusEvent& status)
+      {
+        {
+          std::lock_guard<std::mutex> lock(code_mutex);
+          codes.push_back(status.code);
+        }
+        if (status.code == StatusCode::StoppedMaxAttempts)
+        {
+          client_ptr->stop();
+        }
+      }));
+
+  ASSERT_TRUE(waitForPredicate([&]()
+                               {
+                                 const std::vector<StatusCode> copied =
+                                     copyStatusCodes(codes, code_mutex);
+                                 return containsStatusCode(copied, StatusCode::StoppedMaxAttempts);
+                               },
+                               std::chrono::milliseconds(5000)));
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+}
+
+TEST(NtripClientTest, CanRestartAfterStopFromStatusCallback)
+{
+  NtripClientConfig config = makeConfig(65004);
+  config.max_attempts = 1;
+  config.transport_reconnect_initial_delay_sec = 0.01;
+  config.transport_reconnect_max_delay_sec = 0.01;
+  NtripClient client(config);
+  NtripClient* client_ptr = &client;
+
+  std::mutex code_mutex;
+  std::vector<StatusCode> first_run_codes;
+
+  ASSERT_TRUE(client.start(
+      [](const std::vector<std::uint8_t>&) {},
+      [&](const ros_ntrip_client::StatusEvent& status)
+      {
+        {
+          std::lock_guard<std::mutex> lock(code_mutex);
+          first_run_codes.push_back(status.code);
+        }
+        if (status.code == StatusCode::StoppedMaxAttempts)
+        {
+          client_ptr->stop();
+        }
+      }));
+
+  ASSERT_TRUE(waitForPredicate([&]()
+                               {
+                                 const std::vector<StatusCode> copied =
+                                     copyStatusCodes(first_run_codes, code_mutex);
+                                 return containsStatusCode(copied, StatusCode::StoppedMaxAttempts);
+                               },
+                               std::chrono::milliseconds(5000)));
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+  ASSERT_TRUE(client.start(
+      [](const std::vector<std::uint8_t>&) {},
+      [](const ros_ntrip_client::StatusEvent&) {}));
+  client.stop();
+}
+
+TEST(NtripClientTest, StartReturnsFalseImmediatelyWhenAlreadyRunning)
+{
+  MockCaster caster([](int client_fd)
+                    {
+                      (void)readRequest(client_fd);
+                      const std::string response = "ICY 200 OK\r\n";
+                      ASSERT_EQ(send(client_fd, response.data(), response.size(), 0),
+                                static_cast<ssize_t>(response.size()));
+                      std::this_thread::sleep_for(std::chrono::milliseconds(300));
+                    });
+
+  NtripClientConfig config = makeConfig(caster.port());
+  config.max_attempts = 1;
+  NtripClient client(config);
+
+  ASSERT_TRUE(client.start(
+      [](const std::vector<std::uint8_t>&) {},
+      [](const ros_ntrip_client::StatusEvent&) {}));
+
+  const auto start_time = std::chrono::steady_clock::now();
+  const bool started_again = client.start(
+      [](const std::vector<std::uint8_t>&) {},
+      [](const ros_ntrip_client::StatusEvent&) {});
+  const auto elapsed = std::chrono::steady_clock::now() - start_time;
+
+  EXPECT_FALSE(started_again);
+  EXPECT_LT(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count(), 100);
+
+  client.stop();
+  caster.stop();
+}
+
+TEST(NtripClientTest, DoesNotSendGgaBeforeSessionAccepted)
+{
+  std::string request;
+  std::mutex request_mutex;
+
+  MockCaster caster([&](int client_fd)
+                    {
+                      std::this_thread::sleep_for(std::chrono::milliseconds(150));
+                      const std::string captured_request = readRequest(client_fd);
+                      {
+                        std::lock_guard<std::mutex> lock(request_mutex);
+                        request = captured_request;
+                      }
+                      const std::string response = "ICY 200 OK\r\n";
+                      ASSERT_EQ(send(client_fd, response.data(), response.size(), 0),
+                                static_cast<ssize_t>(response.size()));
+                      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                    });
+
+  NtripClientConfig config = makeConfig(caster.port());
+  config.max_attempts = 1;
+  NtripClient client(config);
+
+  ASSERT_TRUE(client.start(
+      [](const std::vector<std::uint8_t>&) {},
+      [](const ros_ntrip_client::StatusEvent&) {}));
+
+  client.updateGgaSentence("$GPGGA,123519.00,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*47");
+
+  ASSERT_TRUE(waitForPredicate([&]()
+                               {
+                                 std::lock_guard<std::mutex> lock(request_mutex);
+                                 return !request.empty();
+                               }));
+
+  client.stop();
+  caster.stop();
+
+  std::lock_guard<std::mutex> lock(request_mutex);
+  EXPECT_NE(request.find("GET /TEST HTTP/1.1"), std::string::npos);
+  EXPECT_EQ(request.find("$GPGGA"), std::string::npos);
+}
+
+TEST(NtripClientTest, StopIsSafeDuringConcurrentGgaUpdates)
+{
+  MockCaster caster([](int client_fd)
+                    {
+                      (void)readRequest(client_fd);
+                      const std::string response = "ICY 200 OK\r\n";
+                      ASSERT_EQ(send(client_fd, response.data(), response.size(), 0),
+                                static_cast<ssize_t>(response.size()));
+                      std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                    });
+
+  NtripClientConfig config = makeConfig(caster.port());
+  config.max_attempts = 1;
+  config.send_initial_gga = true;
+  NtripClient client(config);
+
+  ASSERT_TRUE(client.start(
+      [](const std::vector<std::uint8_t>&) {},
+      [](const ros_ntrip_client::StatusEvent&) {}));
+
+  ASSERT_TRUE(waitForPredicate([&]()
+                               {
+                                 const ros_ntrip_client::NtripClientCounters counters =
+                                     client.getCounters();
+                                 return counters.bytes_received == 0U;
+                               },
+                               std::chrono::milliseconds(200)));
+
+  std::atomic<bool> keep_sending{true};
+  std::thread updater([&]()
+                      {
+                        while (keep_sending.load())
+                        {
+                          client.updateGgaSentence(
+                              "$GPGGA,123519.00,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*47");
+                        }
+                      });
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  client.stop();
+  keep_sending = false;
+  updater.join();
+  caster.stop();
 }
 
 TEST(NtripClientTest, TransportConnectFailureUsesTransportBackoffSettings)

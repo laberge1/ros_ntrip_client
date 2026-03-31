@@ -40,6 +40,22 @@ bool NtripClient::start(DataCallback data_callback, StatusCallback status_callba
     return false;
   }
 
+  if (running_)
+  {
+    setStatus(StatusCode::Info, "client is already running");
+    return false;
+  }
+
+  if (worker_thread_.joinable())
+  {
+    if (std::this_thread::get_id() == worker_thread_.get_id())
+    {
+      setStatus(StatusCode::Info, "cannot restart client from its own callback thread");
+      return false;
+    }
+    worker_thread_.join();
+  }
+
   bool expected = false;
   if (!running_.compare_exchange_strong(expected, true))
   {
@@ -56,24 +72,36 @@ bool NtripClient::start(DataCallback data_callback, StatusCallback status_callba
 void NtripClient::stop()
 {
   const bool was_running = running_.exchange(false);
+  const bool called_from_worker =
+      worker_thread_.joinable() && std::this_thread::get_id() == worker_thread_.get_id();
 
-  int socket_to_close = -1;
+  int socket_to_shutdown = -1;
   if (was_running)
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    socket_to_close = transport_.socket_fd;
+    socket_to_shutdown = transport_.socket_fd;
   }
 
-  if (was_running && socket_to_close >= 0)
+  if (was_running && socket_to_shutdown >= 0)
   {
-    shutdown(socket_to_close, SHUT_RDWR);
-    close(socket_to_close);
+    shutdown(socket_to_shutdown, SHUT_RDWR);
   }
 
   if (worker_thread_.joinable())
   {
+    if (called_from_worker)
+    {
+      return;
+    }
     worker_thread_.join();
   }
+
+  TransportState transport;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    transport = detachActiveTransportLocked();
+  }
+  cleanupDetachedTransport(transport);
 }
 
 void NtripClient::updateGgaSentence(const std::string& gga_sentence)
@@ -82,7 +110,7 @@ void NtripClient::updateGgaSentence(const std::string& gga_sentence)
   {
     std::lock_guard<std::mutex> lock(mutex_);
     session_.latest_gga_sentence = gga_sentence;
-    if (transport_.socket_fd >= 0)
+    if (session_.uplink_ready && transport_.socket_fd >= 0)
     {
       socket_fd = transport_.socket_fd;
     }
@@ -105,15 +133,24 @@ void NtripClient::workerLoop()
   while (running_)
   {
     int display_attempt = 0;
+    bool stopped_max_attempts = false;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       if (config_.max_attempts > 0 && reconnect_.total_failed_cycles >= config_.max_attempts)
       {
-        setStatus(StatusCode::StoppedMaxAttempts, "maximum connection attempts reached");
-        break;
+        stopped_max_attempts = true;
       }
-      ++reconnect_.display_attempts;
-      display_attempt = reconnect_.display_attempts;
+      else
+      {
+        ++reconnect_.display_attempts;
+        display_attempt = reconnect_.display_attempts;
+      }
+    }
+
+    if (stopped_max_attempts)
+    {
+      setStatus(StatusCode::StoppedMaxAttempts, "maximum connection attempts reached");
+      break;
     }
 
     std::ostringstream attempt_msg;
@@ -163,11 +200,15 @@ void NtripClient::workerLoop()
     }
 
     {
-      std::lock_guard<std::mutex> lock(mutex_);
-      if (transport_.socket_fd == socket_fd)
+      TransportState transport;
       {
-        cleanupActiveTransportLocked();
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (transport_.socket_fd == socket_fd)
+        {
+          transport = detachActiveTransportLocked();
+        }
       }
+      cleanupDetachedTransport(transport);
     }
 
     if (!running_)
@@ -226,6 +267,7 @@ void NtripClient::workerLoop()
 
 void NtripClient::resetSessionStateLocked()
 {
+  session_.uplink_ready = false;
   session_.first_rtcm_frame_received = false;
   session_.stream_active_status_sent = false;
   session_.reconnect_state_reset = false;

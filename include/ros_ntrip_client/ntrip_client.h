@@ -135,6 +135,7 @@ private:
   struct SessionState
   {
     std::vector<std::uint8_t> rtcm_buffer;
+    bool uplink_ready = false;
     bool first_rtcm_frame_received = false;
     bool stream_active_status_sent = false;
     bool reconnect_state_reset = false;
@@ -159,7 +160,8 @@ private:
   void workerLoop();
   int connectToCaster();
   bool configureTlsForSocket(int socket_fd);
-  void cleanupActiveTransportLocked();
+  TransportState detachActiveTransportLocked();
+  void cleanupDetachedTransport(TransportState transport);
   bool sendRequest(int socket_fd);
   bool readResponseHeaders(int socket_fd, std::string& headers);
   bool streamData(int socket_fd);
@@ -185,6 +187,7 @@ private:
   StatusCallback status_callback_;
 
   mutable std::mutex mutex_;
+  std::mutex send_mutex_;
   std::thread worker_thread_;
   std::atomic<bool> running_{false};
   NtripClientCounters counters_;

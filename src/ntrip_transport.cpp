@@ -269,8 +269,12 @@ int NtripClient::connectToCaster()
 
       if (!configureTlsForSocket(socket_fd))
       {
-        std::lock_guard<std::mutex> lock(mutex_);
-        cleanupActiveTransportLocked();
+        TransportState transport;
+        {
+          std::lock_guard<std::mutex> lock(mutex_);
+          transport = detachActiveTransportLocked();
+        }
+        cleanupDetachedTransport(transport);
         continue;
       }
     }
@@ -428,31 +432,31 @@ bool NtripClient::configureTlsForSocket(int socket_fd)
   return true;
 }
 
-void NtripClient::cleanupActiveTransportLocked()
+NtripClient::TransportState NtripClient::detachActiveTransportLocked()
 {
-  SSL* ssl = transport_.ssl;
-  SSL_CTX* ssl_ctx = transport_.ssl_ctx;
-  const int socket_fd = transport_.socket_fd;
+  TransportState detached = transport_;
+  transport_ = TransportState{};
+  return detached;
+}
 
-  transport_.ssl = nullptr;
-  transport_.ssl_ctx = nullptr;
-  transport_.socket_fd = -1;
+void NtripClient::cleanupDetachedTransport(TransportState transport)
+{
+  std::lock_guard<std::mutex> send_lock(send_mutex_);
 
-  if (ssl != nullptr)
+  if (transport.ssl != nullptr)
   {
-    SSL_shutdown(ssl);
-    SSL_free(ssl);
+    SSL_free(transport.ssl);
   }
 
-  if (ssl_ctx != nullptr)
+  if (transport.ssl_ctx != nullptr)
   {
-    SSL_CTX_free(ssl_ctx);
+    SSL_CTX_free(transport.ssl_ctx);
   }
 
-  if (socket_fd >= 0)
+  if (transport.socket_fd >= 0)
   {
-    shutdown(socket_fd, SHUT_RDWR);
-    close(socket_fd);
+    shutdown(transport.socket_fd, SHUT_RDWR);
+    close(transport.socket_fd);
   }
 }
 
@@ -601,13 +605,17 @@ bool NtripClient::readResponseHeaders(int socket_fd, std::string& headers)
   const std::string remaining_body = headers.substr(header_end);
   headers = header_block;
 
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    session_.uplink_ready = true;
+  }
+  setStatus(StatusCode::SessionAccepted, "caster accepted stream");
+
   if (!remaining_body.empty())
   {
     processRtcmBytes(reinterpret_cast<const std::uint8_t*>(remaining_body.data()), remaining_body.size());
     dispatchRtcmFrames();
   }
-
-  setStatus(StatusCode::SessionAccepted, "caster accepted stream");
 
   if (config_.send_initial_gga)
   {
@@ -733,6 +741,8 @@ ssize_t NtripClient::writeSome(int socket_fd, const void* buffer, std::size_t bu
 
 bool NtripClient::sendRaw(int socket_fd, const std::string& bytes)
 {
+  std::lock_guard<std::mutex> send_lock(send_mutex_);
+
   std::size_t total_sent = 0U;
   while (running_ && total_sent < bytes.size())
   {

@@ -1,5 +1,6 @@
 #include "ntrip_client_node_utils.h"
 
+#include <mutex>
 #include <memory>
 #include <sstream>
 #include <vector>
@@ -32,6 +33,7 @@ int main(int argc, char** argv)
 
   ros_ntrip_client::NtripClient client(config);
   auto latest_gga = std::make_shared<std::string>();
+  auto latest_gga_mutex = std::make_shared<std::mutex>();
 
   auto publish_status = [&](const ros_ntrip_client::StatusEvent& event)
   {
@@ -57,17 +59,24 @@ int main(int argc, char** argv)
   ros::Subscriber gga_sub = nh.subscribe<nmea_msgs::Sentence>(
       node_config.gga_topic, 10, [&](const nmea_msgs::Sentence::ConstPtr& msg)
       {
-        *latest_gga = msg->sentence;
+        {
+          std::lock_guard<std::mutex> lock(*latest_gga_mutex);
+          *latest_gga = msg->sentence;
+        }
         client.updateGgaSentence(msg->sentence);
       });
 
   if (node_config.use_fixed_gga_position)
   {
-    *latest_gga = ros_ntrip_client::node_utils::positionToGga(
+    const std::string fixed_gga = ros_ntrip_client::node_utils::positionToGga(
         node_config.fixed_latitude_deg,
         node_config.fixed_longitude_deg,
         node_config.fixed_altitude_m);
-    client.updateGgaSentence(*latest_gga);
+    {
+      std::lock_guard<std::mutex> lock(*latest_gga_mutex);
+      *latest_gga = fixed_gga;
+    }
+    client.updateGgaSentence(fixed_gga);
   }
 
   ros::Timer counters_timer = nh.createTimer(
@@ -78,19 +87,27 @@ int main(int argc, char** argv)
   {
     gga_timer.reset(new ros::Timer(
         nh.createTimer(ros::Duration(node_config.gga_send_interval_sec),
-                       [&, latest_gga](const ros::TimerEvent&)
+                       [&, latest_gga, latest_gga_mutex](const ros::TimerEvent&)
                        {
+                         std::string gga_to_send;
                          if (node_config.use_fixed_gga_position)
                          {
-                           *latest_gga = ros_ntrip_client::node_utils::positionToGga(
+                           gga_to_send = ros_ntrip_client::node_utils::positionToGga(
                                node_config.fixed_latitude_deg,
                                node_config.fixed_longitude_deg,
                                node_config.fixed_altitude_m);
+                           std::lock_guard<std::mutex> lock(*latest_gga_mutex);
+                           *latest_gga = gga_to_send;
+                         }
+                         else
+                         {
+                           std::lock_guard<std::mutex> lock(*latest_gga_mutex);
+                           gga_to_send = *latest_gga;
                          }
 
-                         if (!latest_gga->empty())
+                         if (!gga_to_send.empty())
                          {
-                           client.updateGgaSentence(*latest_gga);
+                           client.updateGgaSentence(gga_to_send);
                          }
                        })));
   }
