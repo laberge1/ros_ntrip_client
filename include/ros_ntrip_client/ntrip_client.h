@@ -101,6 +101,8 @@ struct StatusEvent
   std::string message;
 };
 
+std::string toString(StatusCode code);
+
 enum class FailureCategory
 {
   None,

@@ -26,6 +26,7 @@ add_library(ntrip_client
   src/ntrip_client.cpp
   src/ntrip_transport.cpp
   src/rtcm_framer.cpp
+  src/status_code.cpp
 )
 target_link_libraries(ntrip_client
   OpenSSL::SSL
@@ -35,6 +36,7 @@ target_link_libraries(ntrip_client
 
 add_executable(ntrip_client_node
   src/ntrip_client_node.cpp
+  src/ntrip_client_node_utils.cpp
 )
 target_link_libraries(ntrip_client_node
   ntrip_client
