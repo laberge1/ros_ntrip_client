@@ -503,7 +503,7 @@ Expected external ROS dependencies:
 
 ## Smoke Test In Isolation
 
-This package includes a minimal mock caster at `scripts/mock_ntrip_caster.py`. It is a transport smoke test only. It verifies connection, reconnect, topic publication, and optional GGA forwarding. It does not validate RTCM payload correctness.
+This package includes a minimal mock caster at `scripts/mock_ntrip_caster.py`. It verifies connection, reconnect, topic publication, and optional GGA forwarding. It serves a valid minimal RTCM frame for smoke testing and integration tests, but it is still only a lightweight test fixture, not a full caster implementation.
 
 Terminal 1:
 
@@ -578,14 +578,26 @@ To test reconnect pacing:
 - stop the mock caster and watch `/ntrip_status`
 - confirm reconnect attempts slow down instead of hammering the server
 
-## Run Unit Tests
+## Run Tests
 
-The package also includes a small gtest suite for the C++ client library. These tests cover:
+The package includes:
+
+- gtests for the reusable C++ client library
+- gtests for ROS node utility helpers
+- a `rostest` integration test for the real `ntrip_client_node`
+
+Current coverage includes:
 
 - successful RTCM startup
-- header timeout before session acceptance
-- accepted session that never produces a first RTCM frame
-- accepted session that closes without sending stream data
+- response classification (`401`, `404`, `429`, `503`, sourcetable)
+- session-start timeout and RTCM timeout
+- accepted empty sessions and non-RTCM streams
+- reconnect and backoff policy behavior
+- transport vs service failure classification
+- TLS failure cases, verified TLS success, and hostname verification
+- counters, CRC failures, and buffer trimming
+- callback lifecycle and exception handling
+- ROS node status, counters, GGA forwarding, and `rtcm` publication
 
 From a fresh catkin workspace:
 
@@ -596,14 +608,16 @@ git clone https://github.com/olliewalsh/ros_ntrip_client.git
 cd ..
 source /opt/ros/noetic/setup.bash
 rosdep install --from-paths src --ignore-src -r -y
-catkin_make run_tests_ros_ntrip_client_ntrip_client_test
+catkin_make run_tests_ros_ntrip_client
 catkin_test_results build
 ```
 
-If your catkin version uses the gtest-specific target naming, use:
+If you want to run the individual test targets:
 
 ```bash
 catkin_make run_tests_ros_ntrip_client_gtest_ntrip_client_test
+catkin_make run_tests_ros_ntrip_client_gtest_ntrip_client_node_utils_test
+catkin_make run_tests_ros_ntrip_client_rostest_test_ntrip_client_node_integration
 catkin_test_results build
 ```
 
