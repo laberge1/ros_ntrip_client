@@ -1,0 +1,30 @@
+<launch>
+  <node pkg="ros_ntrip_client"
+        type="mock_ntrip_caster.py"
+        name="mock_ntrip_caster"
+        output="screen"
+        args="--host 127.0.0.1 --port 2110 --interval-sec 0.2" />
+
+  <node pkg="ros_ntrip_client"
+        type="ntrip_client_node"
+        name="ntrip_client"
+        output="screen">
+    <param name="host" value="127.0.0.1" />
+    <param name="port" value="2110" />
+    <param name="mountpoint" value="TEST" />
+    <param name="read_timeout_sec" value="1.0" />
+    <param name="session_start_timeout_sec" value="2.0" />
+    <param name="rtcm_timeout_sec" value="2.0" />
+    <param name="reconnect_initial_delay_sec" value="0.5" />
+    <param name="reconnect_max_delay_sec" value="0.5" />
+    <param name="transport_reconnect_initial_delay_sec" value="0.2" />
+    <param name="transport_reconnect_max_delay_sec" value="0.2" />
+    <param name="adaptive_reconnect" value="false" />
+    <param name="rtcm_frame_id" value="odom" />
+  </node>
+
+  <test test-name="ntrip_client_node_integration"
+        pkg="ros_ntrip_client"
+        type="test_ntrip_client_node_integration.py"
+        time-limit="20.0" />
+</launch>

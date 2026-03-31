@@ -4,10 +4,11 @@ import argparse
 import socket
 import threading
 import time
+import sys
 
 
 def build_rtcm_payload():
-    return bytes([0xD3, 0x00, 0x04, 0x43, 0x20, 0x00, 0x00, 0x00])
+    return bytes([0xD3, 0x00, 0x00, 0x47, 0xEA, 0x4B])
 
 
 def handle_client(conn, interval_sec):
@@ -41,7 +42,7 @@ def main():
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=2101)
     parser.add_argument("--interval-sec", type=float, default=1.0)
-    args = parser.parse_args()
+    args, _ = parser.parse_known_args(sys.argv[1:])
 
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -57,6 +58,8 @@ def main():
                 target=handle_client, args=(conn, args.interval_sec), daemon=True
             )
             thread.start()
+    except KeyboardInterrupt:
+        pass
     finally:
         server.close()
 

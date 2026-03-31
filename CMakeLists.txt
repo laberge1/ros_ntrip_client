@@ -50,6 +50,12 @@ install(TARGETS ntrip_client ntrip_client_node
   RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
+catkin_install_python(PROGRAMS
+  scripts/mock_ntrip_caster.py
+  test/test_ntrip_client_node_integration.py
+  DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+)
+
 install(DIRECTORY include/${PROJECT_NAME}/
   DESTINATION ${CATKIN_PACKAGE_INCLUDE_DESTINATION}
 )
@@ -60,6 +66,7 @@ install(DIRECTORY launch config
 
 if(CATKIN_ENABLE_TESTING)
   find_package(GTest REQUIRED)
+  find_package(rostest REQUIRED)
   include_directories(${GTEST_INCLUDE_DIRS})
 
   catkin_add_gtest(ntrip_client_test
@@ -98,4 +105,8 @@ if(CATKIN_ENABLE_TESTING)
       target_link_libraries(ntrip_client_node_utils_test ${GTEST_MAIN_LIBRARIES})
     endif()
   endif()
+
+  add_rostest(test/ntrip_client_node_integration.test
+    DEPENDENCIES ntrip_client_node
+  )
 endif()
