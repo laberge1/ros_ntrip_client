@@ -391,20 +391,27 @@ bool NtripClient::streamData(int socket_fd)
       }
     }
 
+    const bool tls_read_pending = hasPendingTlsReadData(socket_fd);
+    int wait_rc = 1;
     fd_set read_fds;
     FD_ZERO(&read_fds);
-    FD_SET(socket_fd, &read_fds);
-    int max_fd = socket_fd;
-    if (wake_pipe_read_fd_ >= 0)
+    if (!tls_read_pending)
     {
-      FD_SET(wake_pipe_read_fd_, &read_fds);
-      max_fd = std::max(max_fd, wake_pipe_read_fd_);
+      FD_SET(socket_fd, &read_fds);
+      int max_fd = socket_fd;
+      if (wake_pipe_read_fd_ >= 0)
+      {
+        FD_SET(wake_pipe_read_fd_, &read_fds);
+        max_fd = std::max(max_fd, wake_pipe_read_fd_);
+      }
+
+      timeval timeout{};
+      timeout.tv_sec = static_cast<long>(timeout_sec);
+      timeout.tv_usec =
+          static_cast<long>((timeout_sec - static_cast<double>(timeout.tv_sec)) * 1e6);
+      wait_rc = select(max_fd + 1, &read_fds, nullptr, nullptr, &timeout);
     }
 
-    timeval timeout{};
-    timeout.tv_sec = static_cast<long>(timeout_sec);
-    timeout.tv_usec = static_cast<long>((timeout_sec - static_cast<double>(timeout.tv_sec)) * 1e6);
-    const int wait_rc = select(max_fd + 1, &read_fds, nullptr, nullptr, &timeout);
     if (wait_rc == 0)
     {
       bool first_rtcm_received = false;
@@ -465,7 +472,7 @@ bool NtripClient::streamData(int socket_fd)
       return false;
     }
 
-    if (wake_pipe_read_fd_ >= 0 && FD_ISSET(wake_pipe_read_fd_, &read_fds))
+    if (!tls_read_pending && wake_pipe_read_fd_ >= 0 && FD_ISSET(wake_pipe_read_fd_, &read_fds))
     {
       drainWakePipe();
       continue;

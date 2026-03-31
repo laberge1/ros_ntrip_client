@@ -172,6 +172,7 @@ private:
   void closeWakePipe();
   void notifyWorker();
   void drainWakePipe();
+  bool hasPendingTlsReadData(int socket_fd) const;
   bool sendQueuedGgaIfNeeded(int socket_fd);
   ssize_t readSome(int socket_fd, void* buffer, std::size_t buffer_size);
   ssize_t writeSome(int socket_fd, const void* buffer, std::size_t buffer_size);

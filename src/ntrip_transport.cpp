@@ -458,6 +458,20 @@ void NtripClient::cleanupDetachedTransport(TransportState transport)
   }
 }
 
+bool NtripClient::hasPendingTlsReadData(int socket_fd) const
+{
+  SSL* ssl = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (transport_.socket_fd == socket_fd)
+    {
+      ssl = transport_.ssl;
+    }
+  }
+
+  return ssl != nullptr && SSL_pending(ssl) > 0;
+}
+
 bool NtripClient::sendRequest(int socket_fd)
 {
   std::ostringstream request;
