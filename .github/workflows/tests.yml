@@ -1,0 +1,48 @@
+name: Tests
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  catkin-test:
+    runs-on: ubuntu-latest
+    container:
+      image: ros:noetic-ros-base
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        shell: bash
+        run: |
+          set -eux
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential \
+            cmake \
+            libgtest-dev \
+            libssl-dev \
+            python3-catkin-tools \
+            python3-rosdep \
+            ros-noetic-nmea-msgs \
+            ros-noetic-roscpp \
+            ros-noetic-rtcm-msgs \
+            ros-noetic-std-msgs
+
+      - name: Build And Run Tests
+        shell: bash
+        run: |
+          set -eo pipefail
+          set +u
+          source /opt/ros/noetic/setup.bash
+          set -u
+          set -x
+          mkdir -p /ws/src
+          ln -s "${GITHUB_WORKSPACE}" /ws/src/ros_ntrip_client
+          cd /ws
+          catkin_make run_tests_ros_ntrip_client_gtest_ntrip_client_test
+          catkin_test_results build

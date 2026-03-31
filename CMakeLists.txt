@@ -52,3 +52,27 @@ install(DIRECTORY include/${PROJECT_NAME}/
 install(DIRECTORY launch config
   DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
 )
+
+if(CATKIN_ENABLE_TESTING)
+  find_package(GTest REQUIRED)
+  include_directories(${GTEST_INCLUDE_DIRS})
+
+  catkin_add_gtest(ntrip_client_test
+    test/test_ntrip_client.cpp
+  )
+  if(TARGET ntrip_client_test)
+    target_link_libraries(ntrip_client_test
+      ntrip_client
+      OpenSSL::SSL
+      OpenSSL::Crypto
+      ${catkin_LIBRARIES}
+      ${GTEST_LIBRARIES}
+      pthread
+    )
+    if(TARGET GTest::Main)
+      target_link_libraries(ntrip_client_test GTest::Main)
+    elseif(GTEST_MAIN_LIBRARIES)
+      target_link_libraries(ntrip_client_test ${GTEST_MAIN_LIBRARIES})
+    endif()
+  endif()
+endif()

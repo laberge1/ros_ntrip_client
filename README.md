@@ -529,3 +529,40 @@ To test reconnect pacing:
 - optionally set `transport_reconnect_initial_delay_sec` to `1.0` and `transport_reconnect_max_delay_sec` to `5.0` for roaming-style testing
 - stop the mock caster and watch `/ntrip_status`
 - confirm reconnect attempts slow down instead of hammering the server
+
+## Run Unit Tests
+
+The package also includes a small gtest suite for the C++ client library. These tests cover:
+
+- successful RTCM startup
+- header timeout before session acceptance
+- accepted session that never produces a first RTCM frame
+- accepted session that closes without sending stream data
+
+From a fresh catkin workspace:
+
+```bash
+mkdir -p ~/ntrip_ws/src
+cd ~/ntrip_ws/src
+git clone https://github.com/olliewalsh/ros_ntrip_client.git
+cd ..
+source /opt/ros/noetic/setup.bash
+rosdep install --from-paths src --ignore-src -r -y
+catkin_make run_tests_ros_ntrip_client_ntrip_client_test
+catkin_test_results build
+```
+
+If your catkin version uses the gtest-specific target naming, use:
+
+```bash
+catkin_make run_tests_ros_ntrip_client_gtest_ntrip_client_test
+catkin_test_results build
+```
+
+To build the test target without running it:
+
+```bash
+cd ~/ntrip_ws
+source /opt/ros/noetic/setup.bash
+catkin_make --pkg ros_ntrip_client tests
+```
