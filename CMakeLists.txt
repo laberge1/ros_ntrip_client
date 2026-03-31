@@ -19,6 +19,7 @@ catkin_package(
 
 include_directories(
   include
+  src
   ${catkin_INCLUDE_DIRS}
 )
 
@@ -77,6 +78,24 @@ if(CATKIN_ENABLE_TESTING)
       target_link_libraries(ntrip_client_test GTest::Main)
     elseif(GTEST_MAIN_LIBRARIES)
       target_link_libraries(ntrip_client_test ${GTEST_MAIN_LIBRARIES})
+    endif()
+  endif()
+
+  catkin_add_gtest(ntrip_client_node_utils_test
+    test/test_ntrip_client_node_utils.cpp
+    src/ntrip_client_node_utils.cpp
+  )
+  if(TARGET ntrip_client_node_utils_test)
+    target_link_libraries(ntrip_client_node_utils_test
+      ntrip_client
+      ${catkin_LIBRARIES}
+      ${GTEST_LIBRARIES}
+      pthread
+    )
+    if(TARGET GTest::Main)
+      target_link_libraries(ntrip_client_node_utils_test GTest::Main)
+    elseif(GTEST_MAIN_LIBRARIES)
+      target_link_libraries(ntrip_client_node_utils_test ${GTEST_MAIN_LIBRARIES})
     endif()
   endif()
 endif()

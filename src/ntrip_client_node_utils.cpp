@@ -150,5 +150,28 @@ std::string positionToGga(double latitude, double longitude, double altitude)
   return computeNmeaChecksumPayload(payload.str());
 }
 
+std::string formatCounters(const NtripClientCounters& counters)
+{
+  std::ostringstream stream;
+  stream << "bytes_received=" << counters.bytes_received
+         << " frames_published=" << counters.frames_published
+         << " crc_failures=" << counters.crc_failures
+         << " discarded_bytes=" << counters.discarded_bytes
+         << " buffer_trimmed_bytes=" << counters.buffer_trimmed_bytes;
+  return stream.str();
+}
+
+rtcm_msgs::Message makeRtcmMessage(
+    const std::vector<std::uint8_t>& data,
+    const std::string& frame_id,
+    const ros::Time& stamp)
+{
+  rtcm_msgs::Message message;
+  message.header.stamp = stamp;
+  message.header.frame_id = frame_id;
+  message.message = data;
+  return message;
+}
+
 }  // namespace node_utils
 }  // namespace ros_ntrip_client

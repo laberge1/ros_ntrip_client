@@ -1,7 +1,9 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
+#include <rtcm_msgs/Message.h>
 #include <ros/ros.h>
 
 #include "ros_ntrip_client/ntrip_client.h"
@@ -25,6 +27,10 @@ struct NodeConfig
 
 NodeConfig loadNodeConfig(ros::NodeHandle& private_nh);
 std::string positionToGga(double latitude, double longitude, double altitude);
+std::string formatCounters(const NtripClientCounters& counters);
+rtcm_msgs::Message makeRtcmMessage(const std::vector<std::uint8_t>& data,
+                                  const std::string& frame_id,
+                                  const ros::Time& stamp);
 
 }  // namespace node_utils
 }  // namespace ros_ntrip_client

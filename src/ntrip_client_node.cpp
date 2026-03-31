@@ -49,15 +49,8 @@ int main(int argc, char** argv)
   auto publish_counters = [&]()
   {
     const ros_ntrip_client::NtripClientCounters counters = client.getCounters();
-    std::ostringstream stream;
-    stream << "bytes_received=" << counters.bytes_received
-           << " frames_published=" << counters.frames_published
-           << " crc_failures=" << counters.crc_failures
-           << " discarded_bytes=" << counters.discarded_bytes
-           << " buffer_trimmed_bytes=" << counters.buffer_trimmed_bytes;
-
     std_msgs::String counters_msg;
-    counters_msg.data = stream.str();
+    counters_msg.data = ros_ntrip_client::node_utils::formatCounters(counters);
     counters_pub.publish(counters_msg);
   };
 
@@ -105,10 +98,8 @@ int main(int argc, char** argv)
   const bool started = client.start(
       [&](const std::vector<std::uint8_t>& chunk)
       {
-        rtcm_msgs::Message message;
-        message.header.stamp = ros::Time::now();
-        message.header.frame_id = node_config.rtcm_frame_id;
-        message.message = chunk;
+        const rtcm_msgs::Message message = ros_ntrip_client::node_utils::makeRtcmMessage(
+            chunk, node_config.rtcm_frame_id, ros::Time::now());
         rtcm_pub.publish(message);
       },
       publish_status);
