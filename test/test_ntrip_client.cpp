@@ -13,6 +13,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
+#include <cstdlib>
 #include <functional>
 #include <mutex>
 #include <stdexcept>
@@ -342,6 +343,35 @@ std::size_t countStatusCodes(
     }
   }
   return count;
+}
+
+double extractBackoffSeconds(const std::string& status)
+{
+  const std::size_t marker = status.rfind(" for ");
+  if (marker == std::string::npos)
+  {
+    return -1.0;
+  }
+  const std::size_t seconds_suffix = status.find('s', marker + 5U);
+  if (seconds_suffix == std::string::npos)
+  {
+    return -1.0;
+  }
+
+  const std::string number = status.substr(marker + 5U, seconds_suffix - (marker + 5U));
+  return std::strtod(number.c_str(), nullptr);
+}
+
+double latestBackoffSeconds(const std::vector<std::string>& statuses)
+{
+  for (auto it = statuses.rbegin(); it != statuses.rend(); ++it)
+  {
+    if (it->find("backing off for ") != std::string::npos)
+    {
+      return extractBackoffSeconds(*it);
+    }
+  }
+  return -1.0;
 }
 
 NtripClientConfig makeConfig(int port)
@@ -866,4 +896,135 @@ TEST(NtripClientTest, MaxAttemptsAppliesToRepeatedTransportFailures)
   const std::vector<std::string> copied_statuses = copyStatuses(statuses, status_mutex);
   EXPECT_EQ(countStatuses(copied_statuses, "connection attempt "), 2U);
   EXPECT_TRUE(containsStatus(copied_statuses, "maximum connection attempts reached"));
+}
+
+TEST(NtripClientTest, TransportConnectFailureUsesTransportBackoffSettings)
+{
+  const int failing_port = 65002;
+  NtripClientConfig config = makeConfig(failing_port);
+  config.max_attempts = 1;
+  config.transport_reconnect_initial_delay_sec = 0.8;
+  config.transport_reconnect_max_delay_sec = 0.8;
+  config.reconnect_initial_delay_sec = 5.0;
+  config.reconnect_max_delay_sec = 5.0;
+  NtripClient client(config);
+
+  std::mutex status_mutex;
+  std::vector<std::string> statuses;
+
+  ASSERT_TRUE(client.start(
+      [](const std::vector<std::uint8_t>&) {},
+      [&](const ros_ntrip_client::StatusEvent& status)
+      {
+        std::lock_guard<std::mutex> lock(status_mutex);
+        statuses.push_back(status.message);
+      }));
+
+  ASSERT_TRUE(waitForPredicate([&]()
+                               {
+                                 const std::vector<std::string> copied =
+                                     copyStatuses(statuses, status_mutex);
+                                 return containsStatus(copied, "transport connect failed, backing off for");
+                               }));
+
+  client.stop();
+
+  const std::vector<std::string> copied_statuses = copyStatuses(statuses, status_mutex);
+  const double backoff_seconds = latestBackoffSeconds(copied_statuses);
+  EXPECT_GE(backoff_seconds, 0.70);
+  EXPECT_LE(backoff_seconds, 0.90);
+}
+
+TEST(NtripClientTest, ServiceFailureUsesServiceBackoffSettings)
+{
+  MockCaster caster([](int client_fd)
+                    {
+                      (void)readRequest(client_fd);
+                      const std::string response = "ICY 200 OK\r\n";
+                      ASSERT_EQ(send(client_fd, response.data(), response.size(), 0),
+                                static_cast<ssize_t>(response.size()));
+                      std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                    });
+
+  NtripClientConfig config = makeConfig(caster.port());
+  config.max_attempts = 1;
+  config.session_start_timeout_sec = 0.2;
+  config.reconnect_initial_delay_sec = 0.8;
+  config.reconnect_max_delay_sec = 0.8;
+  config.transport_reconnect_initial_delay_sec = 5.0;
+  config.transport_reconnect_max_delay_sec = 5.0;
+  NtripClient client(config);
+
+  std::mutex status_mutex;
+  std::vector<std::string> statuses;
+
+  ASSERT_TRUE(client.start(
+      [](const std::vector<std::uint8_t>&) {},
+      [&](const ros_ntrip_client::StatusEvent& status)
+      {
+        std::lock_guard<std::mutex> lock(status_mutex);
+        statuses.push_back(status.message);
+      }));
+
+  ASSERT_TRUE(waitForPredicate([&]()
+                               {
+                                 const std::vector<std::string> copied =
+                                     copyStatuses(statuses, status_mutex);
+                                 return containsStatus(copied, "stream disconnected, backing off for");
+                               }));
+
+  client.stop();
+  caster.stop();
+
+  const std::vector<std::string> copied_statuses = copyStatuses(statuses, status_mutex);
+  const double backoff_seconds = latestBackoffSeconds(copied_statuses);
+  EXPECT_GE(backoff_seconds, 0.70);
+  EXPECT_LE(backoff_seconds, 0.90);
+}
+
+TEST(NtripClientTest, AdaptiveBurstMinimumDelayOverridesServiceBackoff)
+{
+  MockCaster caster([](int client_fd)
+                    {
+                      (void)readRequest(client_fd);
+                      const std::string response = "ICY 200 OK\r\n";
+                      ASSERT_EQ(send(client_fd, response.data(), response.size(), 0),
+                                static_cast<ssize_t>(response.size()));
+                      std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                    });
+
+  NtripClientConfig config = makeConfig(caster.port());
+  config.max_attempts = 1;
+  config.session_start_timeout_sec = 0.05;
+  config.adaptive_reconnect = true;
+  config.adaptive_burst_max_attempts = 1;
+  config.adaptive_burst_window_sec = 0.8;
+  config.reconnect_initial_delay_sec = 0.1;
+  config.reconnect_max_delay_sec = 0.1;
+  NtripClient client(config);
+
+  std::mutex status_mutex;
+  std::vector<std::string> statuses;
+
+  ASSERT_TRUE(client.start(
+      [](const std::vector<std::uint8_t>&) {},
+      [&](const ros_ntrip_client::StatusEvent& status)
+      {
+        std::lock_guard<std::mutex> lock(status_mutex);
+        statuses.push_back(status.message);
+      }));
+
+  ASSERT_TRUE(waitForPredicate([&]()
+                               {
+                                 const std::vector<std::string> copied =
+                                     copyStatuses(statuses, status_mutex);
+                                 return containsStatus(copied, "stream disconnected, backing off for");
+                               }));
+
+  client.stop();
+  caster.stop();
+
+  const std::vector<std::string> copied_statuses = copyStatuses(statuses, status_mutex);
+  const double backoff_seconds = latestBackoffSeconds(copied_statuses);
+  EXPECT_GE(backoff_seconds, 0.70);
 }
