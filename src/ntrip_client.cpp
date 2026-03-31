@@ -256,18 +256,16 @@ bool NtripClient::start(DataCallback data_callback, StatusCallback status_callba
 
 void NtripClient::stop()
 {
-  if (!running_.exchange(false))
-  {
-    return;
-  }
+  const bool was_running = running_.exchange(false);
 
   int socket_to_close = -1;
+  if (was_running)
   {
     std::lock_guard<std::mutex> lock(mutex_);
     socket_to_close = active_socket_;
   }
 
-  if (socket_to_close >= 0)
+  if (was_running && socket_to_close >= 0)
   {
     shutdown(socket_to_close, SHUT_RDWR);
     close(socket_to_close);
