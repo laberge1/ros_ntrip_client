@@ -24,6 +24,8 @@ include_directories(
 
 add_library(ntrip_client
   src/ntrip_client.cpp
+  src/ntrip_transport.cpp
+  src/rtcm_framer.cpp
 )
 target_link_libraries(ntrip_client
   OpenSSL::SSL
