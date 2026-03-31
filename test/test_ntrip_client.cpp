@@ -363,6 +363,53 @@ NtripClientConfig makeConfig(int port)
   return config;
 }
 
+void expectResponseClassification(
+    const std::string& response,
+    StatusCode expected_code,
+    const std::string& expected_message_snippet)
+{
+  MockCaster caster([&](int client_fd)
+                    {
+                      (void)readRequest(client_fd);
+                      ASSERT_EQ(send(client_fd, response.data(), response.size(), 0),
+                                static_cast<ssize_t>(response.size()));
+                      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                    });
+
+  NtripClientConfig config = makeConfig(caster.port());
+  NtripClient client(config);
+
+  std::mutex status_mutex;
+  std::vector<std::string> statuses;
+  std::mutex code_mutex;
+  std::vector<StatusCode> codes;
+
+  ASSERT_TRUE(client.start(
+      [](const std::vector<std::uint8_t>&) {},
+      [&](const ros_ntrip_client::StatusEvent& status)
+      {
+        std::lock_guard<std::mutex> lock(status_mutex);
+        statuses.push_back(status.message);
+        std::lock_guard<std::mutex> code_lock(code_mutex);
+        codes.push_back(status.code);
+      }));
+
+  ASSERT_TRUE(waitForPredicate([&]()
+                               {
+                                 const std::vector<std::string> copied =
+                                     copyStatuses(statuses, status_mutex);
+                                 return containsStatus(copied, expected_message_snippet);
+                               }));
+
+  client.stop();
+  caster.stop();
+
+  const std::vector<StatusCode> copied_codes = copyStatusCodes(codes, code_mutex);
+  EXPECT_TRUE(containsStatusCode(copied_codes, expected_code));
+  const std::vector<std::string> copied_statuses = copyStatuses(statuses, status_mutex);
+  EXPECT_TRUE(containsStatus(copied_statuses, expected_message_snippet));
+}
+
 }  // namespace
 
 TEST(NtripClientTest, PublishesRtcmAndTransitionsToStreamActive)
@@ -473,6 +520,46 @@ TEST(NtripClientTest, TimesOutWaitingForHeaders)
   EXPECT_TRUE(containsStatusCode(copied_codes, StatusCode::TransportHeaderFailed));
   const std::vector<std::string> copied_statuses = copyStatuses(statuses, status_mutex);
   EXPECT_TRUE(containsStatus(copied_statuses, "timed out waiting for caster response headers"));
+}
+
+TEST(NtripClientTest, ClassifiesSourcetableResponseAsInvalidMountpoint)
+{
+  expectResponseClassification(
+      "SOURCETABLE 200 OK\r\nContent-Type: text/plain\r\n\r\n",
+      StatusCode::MountpointInvalid,
+      "received sourcetable response; mountpoint is likely invalid");
+}
+
+TEST(NtripClientTest, ClassifiesUnauthorizedResponse)
+{
+  expectResponseClassification(
+      "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n",
+      StatusCode::AuthFailed,
+      "received unauthorized response; check username, password, and mountpoint");
+}
+
+TEST(NtripClientTest, ClassifiesNotFoundResponse)
+{
+  expectResponseClassification(
+      "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n",
+      StatusCode::MountpointInvalid,
+      "received not-found response; mountpoint or path is likely invalid");
+}
+
+TEST(NtripClientTest, ClassifiesTooManyRequestsResponse)
+{
+  expectResponseClassification(
+      "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 60\r\n\r\n",
+      StatusCode::RateLimited,
+      "received too-many-requests response; caster is rate limiting this client");
+}
+
+TEST(NtripClientTest, ClassifiesServiceUnavailableResponse)
+{
+  expectResponseClassification(
+      "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n",
+      StatusCode::ServiceUnavailable,
+      "received service-unavailable response; caster is temporarily unavailable");
 }
 
 TEST(NtripClientTest, TimesOutWhenSessionDoesNotProduceFirstRtcmFrame)
