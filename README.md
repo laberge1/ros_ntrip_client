@@ -126,6 +126,54 @@ Structured status:
   - `discarded_bytes`
   - `buffer_trimmed_bytes`
 
+## Threading Model
+
+The client uses three execution contexts:
+
+- Worker thread:
+  - owns the NTRIP session lifecycle
+  - owns all socket and TLS I/O
+  - performs request send, header parsing, RTCM reads, reconnect, and queued GGA uplink
+- Callback dispatcher thread:
+  - delivers data and status callbacks from an internal queue
+  - keeps user callbacks off the worker thread
+- Caller / ROS threads:
+  - may call `start()`, `stop()`, `getCounters()`, and `updateGgaSentence()`
+  - do not write directly to the socket
+
+GGA behavior:
+
+- `updateGgaSentence()` only updates cached state
+- if the session is already accepted, it wakes the worker through an internal wake pipe
+- the worker thread sends the latest queued GGA at a safe point
+- no external thread performs socket or TLS writes
+
+Callback behavior:
+
+- `DataCallback` and `StatusCallback` run on the callback dispatcher thread, not on the worker thread
+- `stop()` from a callback is supported
+- destroying the client from a callback is also safe because callbacks no longer run on the worker
+- callback exceptions are caught and suppressed by the dispatcher so they do not terminate the process
+
+Shutdown semantics:
+
+- `stop()` requests shutdown, wakes the worker, joins the worker thread, then tears down transport state
+- if `stop()` is called when the client is already stopped, it is effectively a no-op
+- `start()` only starts a stopped client; it is not a restart API
+- to restart, call `stop()` and then `start()`
+
+Thread-safety expectations:
+
+- safe from other threads:
+  - `start()`
+  - `stop()`
+  - `updateGgaSentence()`
+  - `getCounters()`
+- not intended as a general reconfiguration API while running:
+  - changing connection parameters after construction
+
+This model is intentionally conservative: one thread owns transport I/O, one thread owns callback delivery, and other threads only update cached state or request lifecycle changes.
+
 ## Launch
 
 ```bash
