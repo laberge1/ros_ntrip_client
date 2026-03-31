@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/types.h>
@@ -12,6 +13,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdio>
 #include <cstring>
 #include <cstdlib>
 #include <functional>
@@ -233,6 +235,45 @@ private:
   std::thread server_thread_;
 };
 
+class TempFile
+{
+public:
+  explicit TempFile(const std::string& contents)
+  {
+    char path_template[] = "/tmp/ros_ntrip_client_test_XXXXXX";
+    const int fd = mkstemp(path_template);
+    if (fd < 0)
+    {
+      throw std::runtime_error("failed to create temporary file");
+    }
+
+    path_ = path_template;
+    const ssize_t written = write(fd, contents.data(), contents.size());
+    close(fd);
+    if (written != static_cast<ssize_t>(contents.size()))
+    {
+      std::remove(path_.c_str());
+      throw std::runtime_error("failed to write temporary file contents");
+    }
+  }
+
+  ~TempFile()
+  {
+    if (!path_.empty())
+    {
+      std::remove(path_.c_str());
+    }
+  }
+
+  const std::string& path() const
+  {
+    return path_;
+  }
+
+private:
+  std::string path_;
+};
+
 std::string readRequest(int client_fd)
 {
   timeval timeout{};
@@ -439,6 +480,19 @@ void expectResponseClassification(
   const std::vector<std::string> copied_statuses = copyStatuses(statuses, status_mutex);
   EXPECT_TRUE(containsStatus(copied_statuses, expected_message_snippet));
 }
+
+const char kTestCertificatePem[] =
+    "-----BEGIN CERTIFICATE-----\n"
+    "MIIBqTCCAU+gAwIBAgIUe3VTNff7kwh28ykVfoCENKz7LQ0wCgYIKoZIzj0EAwIw\n"
+    "GDEWMBQGA1UEAwwNcm9zLW50cmlwLXRlc3QwHhcNMjYwMzMxMDQwMDAwWhcNMzYw\n"
+    "MzI5MDQwMDAwWjAYMRYwFAYDVQQDDA1yb3MtbnRyaXAtdGVzdDBZMBMGByqGSM49\n"
+    "AgEGCCqGSM49AwEHA0IABJ6o6hMHDL/95B2S/bRMyCV2wAPOQgpdnXl16rDpD+s/\n"
+    "xkD114F8CbnMD4HzyBbs6k8ZZrVSu2Ce279b9Ec/WWijUzBRMB0GA1UdDgQWBBRz\n"
+    "y83H8XTur2qxGn8pY/+bexdFvDAfBgNVHSMEGDAWgBRzy83H8XTur2qxGn8pY/+b\n"
+    "exdFvDAPBgNVHRMBAf8EBTADAQH/MAoGCCqGSM49BAMCA0gAMEUCIDdxHDBPPfQj\n"
+    "TA70vsK1tnE+bBZ5qTqL0U8nyCLlcQFV AiEAxgN9zeps2sonMSKcwk5Y8ZndKyV+\n"
+    "XS6/4FwXk4Hknc0=\n"
+    "-----END CERTIFICATE-----\n";
 
 }  // namespace
 
@@ -1027,4 +1081,94 @@ TEST(NtripClientTest, AdaptiveBurstMinimumDelayOverridesServiceBackoff)
   const std::vector<std::string> copied_statuses = copyStatuses(statuses, status_mutex);
   const double backoff_seconds = latestBackoffSeconds(copied_statuses);
   EXPECT_GE(backoff_seconds, 0.70);
+}
+
+TEST(NtripClientTest, ReportsTlsHandshakeFailureAgainstPlainTcpCaster)
+{
+  MockCaster caster([](int client_fd)
+                    {
+                      (void)readRequest(client_fd);
+                      std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                    });
+
+  NtripClientConfig config = makeConfig(caster.port());
+  config.tls_enabled = true;
+  config.tls_verify_peer = false;
+  config.max_attempts = 1;
+  NtripClient client(config);
+
+  std::mutex status_mutex;
+  std::vector<std::string> statuses;
+  std::mutex code_mutex;
+  std::vector<StatusCode> codes;
+
+  ASSERT_TRUE(client.start(
+      [](const std::vector<std::uint8_t>&) {},
+      [&](const ros_ntrip_client::StatusEvent& status)
+      {
+        std::lock_guard<std::mutex> lock(status_mutex);
+        statuses.push_back(status.message);
+        std::lock_guard<std::mutex> code_lock(code_mutex);
+        codes.push_back(status.code);
+      }));
+
+  ASSERT_TRUE(waitForPredicate([&]()
+                               {
+                                 const std::vector<std::string> copied =
+                                     copyStatuses(statuses, status_mutex);
+                                 return containsStatus(copied, "TLS handshake failed:");
+                               }));
+
+  client.stop();
+  caster.stop();
+
+  const std::vector<StatusCode> copied_codes = copyStatusCodes(codes, code_mutex);
+  EXPECT_TRUE(containsStatusCode(copied_codes, StatusCode::TlsError));
+}
+
+TEST(NtripClientTest, RejectsPartialMtlsConfiguration)
+{
+  TempFile certificate(kTestCertificatePem);
+  MockCaster caster([](int client_fd)
+                    {
+                      std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                      shutdown(client_fd, SHUT_RDWR);
+                    });
+
+  NtripClientConfig config = makeConfig(caster.port());
+  config.tls_enabled = true;
+  config.tls_verify_peer = false;
+  config.tls_client_cert_file = certificate.path();
+  config.max_attempts = 1;
+  NtripClient client(config);
+
+  std::mutex status_mutex;
+  std::vector<std::string> statuses;
+  std::mutex code_mutex;
+  std::vector<StatusCode> codes;
+
+  ASSERT_TRUE(client.start(
+      [](const std::vector<std::uint8_t>&) {},
+      [&](const ros_ntrip_client::StatusEvent& status)
+      {
+        std::lock_guard<std::mutex> lock(status_mutex);
+        statuses.push_back(status.message);
+        std::lock_guard<std::mutex> code_lock(code_mutex);
+        codes.push_back(status.code);
+      }));
+
+  ASSERT_TRUE(waitForPredicate([&]()
+                               {
+                                 const std::vector<std::string> copied =
+                                     copyStatuses(statuses, status_mutex);
+                                 return containsStatus(
+                                     copied,
+                                     "both tls_client_cert_file and tls_client_key_file are required for mTLS");
+                               }));
+
+  client.stop();
+  caster.stop();
+
+  const std::vector<StatusCode> copied_codes = copyStatusCodes(codes, code_mutex);
+  EXPECT_TRUE(containsStatusCode(copied_codes, StatusCode::TlsError));
 }

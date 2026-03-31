@@ -336,6 +336,14 @@ bool NtripClient::configureTlsForSocket(int socket_fd)
         ssl_ctx, const_cast<std::string*>(&config_.tls_client_key_password));
   }
 
+  if ((!config_.tls_client_cert_file.empty() && config_.tls_client_key_file.empty()) ||
+      (config_.tls_client_cert_file.empty() && !config_.tls_client_key_file.empty()))
+  {
+    setStatus(StatusCode::TlsError, "both tls_client_cert_file and tls_client_key_file are required for mTLS");
+    SSL_CTX_free(ssl_ctx);
+    return false;
+  }
+
   if (!config_.tls_client_cert_file.empty())
   {
     const int cert_ok =
@@ -358,14 +366,6 @@ bool NtripClient::configureTlsForSocket(int socket_fd)
       SSL_CTX_free(ssl_ctx);
       return false;
     }
-  }
-
-  if ((!config_.tls_client_cert_file.empty() && config_.tls_client_key_file.empty()) ||
-      (config_.tls_client_cert_file.empty() && !config_.tls_client_key_file.empty()))
-  {
-    setStatus(StatusCode::TlsError, "both tls_client_cert_file and tls_client_key_file are required for mTLS");
-    SSL_CTX_free(ssl_ctx);
-    return false;
   }
 
   if (!config_.tls_client_cert_file.empty() && !config_.tls_client_key_file.empty())
