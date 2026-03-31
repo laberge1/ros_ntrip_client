@@ -15,6 +15,10 @@ The client is designed to avoid abusive reconnect loops:
   - `reconnect_initial_delay_sec`
   - `reconnect_max_delay_sec`
   - `reconnect_backoff_multiplier`
+- Separate lighter transport backoff for network-fabric failures and post-stream dropouts:
+  - `transport_reconnect_initial_delay_sec`
+  - `transport_reconnect_max_delay_sec`
+  - `transport_reconnect_backoff_multiplier`
 - Standards-friendly headers:
   - `User-Agent`
   - `Ntrip-Version`
@@ -56,6 +60,7 @@ Important anti-ban controls:
 
 - `~connect_timeout_sec`
 - `~read_timeout_sec`
+- `~session_start_timeout_sec`
 - `~rtcm_timeout_sec`
 - `~adaptive_reconnect`
 - `~adaptive_burst_max_attempts`
@@ -65,6 +70,9 @@ Important anti-ban controls:
 - `~reconnect_initial_delay_sec`
 - `~reconnect_max_delay_sec`
 - `~reconnect_backoff_multiplier`
+- `~transport_reconnect_initial_delay_sec`
+- `~transport_reconnect_max_delay_sec`
+- `~transport_reconnect_backoff_multiplier`
 - `~max_attempts`
 
 TLS controls:
@@ -94,14 +102,18 @@ Adaptive reconnect control:
 
 With the defaults, the client keeps the normal exponential backoff but also avoids exceeding about `12` failed attempts in `60` seconds, and after `300` seconds of continuous failure it slows to one reconnect every `300` seconds.
 
+Transport failures are handled separately from caster-side failures. TCP connect failures and disconnects after a stream has already become active use the lighter `transport_reconnect_*` backoff and do not advance the service-side adaptive reconnect history. This is intended to recover faster from Wi-Fi roaming and other network-fabric interruptions without becoming aggressive toward public casters.
+
 Structured status:
 
 - `ntrip_status` remains the human-readable status text
 - `ntrip_status_code` publishes a machine-readable code such as:
   - `SESSION_ACCEPTED`
   - `STREAM_ACTIVE`
+  - `SESSION_START_TIMEOUT`
   - `SESSION_EMPTY`
   - `SESSION_NO_VALID_RTCM`
+  - `TRANSPORT_HEADER_FAILED`
   - `AUTH_FAILED`
   - `MOUNTPOINT_INVALID`
   - `RATE_LIMITED`
@@ -514,5 +526,6 @@ To test reconnect pacing:
 
 - set `reconnect_initial_delay_sec` to a small value such as `2.0`
 - set `reconnect_max_delay_sec` to a bounded value such as `10.0`
+- optionally set `transport_reconnect_initial_delay_sec` to `1.0` and `transport_reconnect_max_delay_sec` to `5.0` for roaming-style testing
 - stop the mock caster and watch `/ntrip_status`
 - confirm reconnect attempts slow down instead of hammering the server

@@ -305,29 +305,33 @@ NtripClientCounters NtripClient::getCounters() const
 
 void NtripClient::workerLoop()
 {
-  int attempts = 0;
+  int display_attempts = 0;
+  int total_failed_cycles = 0;
+  int service_attempts = 0;
+  int transport_attempts = 0;
 
   while (running_)
   {
-    if (config_.max_attempts > 0 && attempts >= config_.max_attempts)
+    if (config_.max_attempts > 0 && total_failed_cycles >= config_.max_attempts)
     {
       setStatus("maximum connection attempts reached");
       break;
     }
 
-    ++attempts;
+    ++display_attempts;
     std::ostringstream attempt_msg;
-    attempt_msg << "connection attempt " << attempts;
+    attempt_msg << "connection attempt " << display_attempts;
     setStatus(attempt_msg.str());
 
     int socket_fd = connectToCaster();
     if (socket_fd < 0)
     {
-      recordFailureAttempt();
-      const double delay_sec = std::max(computeBackoffDelaySec(attempts),
-                                        computeAdaptiveMinimumDelaySec());
+      ++total_failed_cycles;
+      ++transport_attempts;
+      service_attempts = 0;
+      const double delay_sec = computeTransportBackoffDelaySec(transport_attempts);
       std::ostringstream msg;
-      msg << "connect failed, backing off for " << std::fixed << std::setprecision(2)
+      msg << "transport connect failed, backing off for " << std::fixed << std::setprecision(2)
           << delay_sec << "s";
       setStatus(msg.str());
       if (!sleepForSeconds(delay_sec))
@@ -343,6 +347,7 @@ void NtripClient::workerLoop()
       first_rtcm_frame_received_ = false;
       stream_active_status_sent_ = false;
       reconnect_state_reset_for_session_ = false;
+      last_failure_category_ = FailureCategory::None;
       last_rtcm_frame_at_ = std::chrono::steady_clock::time_point{};
       session_bytes_received_ = 0U;
       session_frames_published_ = 0U;
@@ -357,7 +362,9 @@ void NtripClient::workerLoop()
       std::lock_guard<std::mutex> lock(mutex_);
       if (reconnect_state_reset_for_session_)
       {
-        attempts = 0;
+        total_failed_cycles = 0;
+        service_attempts = 0;
+        transport_attempts = 0;
       }
     }
 
@@ -376,12 +383,35 @@ void NtripClient::workerLoop()
 
     if (!streamed_ok)
     {
-      recordFailureAttempt();
-      const double delay_sec = std::max(computeBackoffDelaySec(attempts),
-                                        computeAdaptiveMinimumDelaySec());
+      FailureCategory failure_category = FailureCategory::Service;
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        failure_category = last_failure_category_;
+      }
+
+      ++total_failed_cycles;
+      double delay_sec = 0.0;
       std::ostringstream msg;
-      msg << "stream disconnected, backing off for " << std::fixed << std::setprecision(2)
-          << delay_sec << "s";
+
+      if (failure_category == FailureCategory::Transport)
+      {
+        ++transport_attempts;
+        service_attempts = 0;
+        delay_sec = computeTransportBackoffDelaySec(transport_attempts);
+        msg << "transport stream disconnected, backing off for " << std::fixed
+            << std::setprecision(2) << delay_sec << "s";
+      }
+      else
+      {
+        ++service_attempts;
+        transport_attempts = 0;
+        recordFailureAttempt();
+        delay_sec = std::max(computeBackoffDelaySec(service_attempts),
+                             computeAdaptiveMinimumDelaySec());
+        msg << "stream disconnected, backing off for " << std::fixed << std::setprecision(2)
+            << delay_sec << "s";
+      }
+
       setStatus(msg.str());
       if (!sleepForSeconds(delay_sec))
       {
@@ -684,6 +714,10 @@ bool NtripClient::sendRequest(int socket_fd)
 
   if (!sendRaw(socket_fd, request.str()))
   {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      last_failure_category_ = FailureCategory::Transport;
+    }
     setStatus("failed to send NTRIP request");
     return false;
   }
@@ -702,22 +736,38 @@ bool NtripClient::readResponseHeaders(int socket_fd, std::string& headers)
     const ssize_t received = readSome(socket_fd, buffer.data(), buffer.size());
     if (received == kReadTimeoutResult)
     {
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        last_failure_category_ = FailureCategory::Transport;
+      }
       setStatus("timed out waiting for caster response headers");
       return false;
     }
     if (received == 0)
     {
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        last_failure_category_ = FailureCategory::Transport;
+      }
       setStatus("caster closed the connection before sending response headers");
       return false;
     }
     if (received < 0)
     {
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        last_failure_category_ = FailureCategory::Transport;
+      }
       setStatus("failed to read response headers");
       return false;
     }
     headers.append(buffer.data(), static_cast<std::size_t>(received));
     if (headers.size() > 8192U)
     {
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        last_failure_category_ = FailureCategory::Service;
+      }
       setStatus(std::string("response headers exceeded 8KB: ") +
                 sanitizeSnippet(headers, 200U));
       return false;
@@ -727,6 +777,10 @@ bool NtripClient::readResponseHeaders(int socket_fd, std::string& headers)
   const std::size_t header_end = findHeaderEnd(headers);
   if (header_end == std::string::npos)
   {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      last_failure_category_ = FailureCategory::Service;
+    }
     setStatus("incomplete response headers");
     return false;
   }
@@ -735,6 +789,10 @@ bool NtripClient::readResponseHeaders(int socket_fd, std::string& headers)
   const bool ok = containsAny(header_block, {"ICY 200 OK", "HTTP/1.0 200 OK", "HTTP/1.1 200 OK"});
   if (!ok)
   {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      last_failure_category_ = FailureCategory::Service;
+    }
     if (containsAny(header_block, {"SOURCETABLE 200 OK"}))
     {
       setStatus("received sourcetable response; mountpoint is likely invalid");
@@ -802,6 +860,7 @@ bool NtripClient::readResponseHeaders(int socket_fd, std::string& headers)
 bool NtripClient::streamData(int socket_fd)
 {
   std::array<std::uint8_t, 4096> buffer{};
+  const auto session_started_at = std::chrono::steady_clock::now();
 
   while (running_)
   {
@@ -816,15 +875,35 @@ bool NtripClient::streamData(int socket_fd)
         last_rtcm_at = last_rtcm_frame_at_;
       }
 
+      const auto now = std::chrono::steady_clock::now();
       if (first_rtcm_received)
       {
-        const auto now = std::chrono::steady_clock::now();
         const std::chrono::duration<double> elapsed = now - last_rtcm_at;
         if (elapsed.count() >= config_.rtcm_timeout_sec)
         {
+          {
+            std::lock_guard<std::mutex> lock(mutex_);
+            last_failure_category_ = FailureCategory::Service;
+          }
           std::ostringstream msg;
           msg << "RTCM data not received for " << std::fixed << std::setprecision(2)
               << config_.rtcm_timeout_sec << " seconds";
+          setStatus(msg.str());
+          return false;
+        }
+      }
+      else
+      {
+        const std::chrono::duration<double> elapsed = now - session_started_at;
+        if (elapsed.count() >= config_.session_start_timeout_sec)
+        {
+          {
+            std::lock_guard<std::mutex> lock(mutex_);
+            last_failure_category_ = FailureCategory::Service;
+          }
+          std::ostringstream msg;
+          msg << "RTCM stream did not start within " << std::fixed << std::setprecision(2)
+              << config_.session_start_timeout_sec << " seconds";
           setStatus(msg.str());
           return false;
         }
@@ -845,21 +924,37 @@ bool NtripClient::streamData(int socket_fd)
       {
         if (session_bytes_received == 0U)
         {
+          {
+            std::lock_guard<std::mutex> lock(mutex_);
+            last_failure_category_ = FailureCategory::Service;
+          }
           setStatus("caster accepted session but closed before sending any stream data");
         }
         else
         {
+          {
+            std::lock_guard<std::mutex> lock(mutex_);
+            last_failure_category_ = FailureCategory::Service;
+          }
           setStatus("caster accepted session but no valid RTCM frames were received before close");
         }
       }
       else
       {
+        {
+          std::lock_guard<std::mutex> lock(mutex_);
+          last_failure_category_ = FailureCategory::Transport;
+        }
         setStatus("caster closed the connection");
       }
       return false;
     }
     if (received < 0)
     {
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        last_failure_category_ = FailureCategory::Transport;
+      }
       setStatus("stream read failed");
       return false;
     }
@@ -1228,6 +1323,21 @@ double NtripClient::computeBackoffDelaySec(int attempt_number) const
                                            static_cast<double>(bounded_attempt - 1));
   const double raw_delay = config_.reconnect_initial_delay_sec * multiplier_power;
   const double bounded_delay = std::min(config_.reconnect_max_delay_sec, raw_delay);
+
+  static thread_local std::mt19937 generator(std::random_device{}());
+  std::uniform_real_distribution<double> jitter(0.9, 1.1);
+  return std::max(0.0, bounded_delay * jitter(generator));
+}
+
+double NtripClient::computeTransportBackoffDelaySec(int attempt_number) const
+{
+  const int bounded_attempt = std::max(1, attempt_number);
+  const double base_multiplier =
+      std::max(1.0, config_.transport_reconnect_backoff_multiplier);
+  const double multiplier_power = std::pow(base_multiplier,
+                                           static_cast<double>(bounded_attempt - 1));
+  const double raw_delay = config_.transport_reconnect_initial_delay_sec * multiplier_power;
+  const double bounded_delay = std::min(config_.transport_reconnect_max_delay_sec, raw_delay);
 
   static thread_local std::mt19937 generator(std::random_device{}());
   std::uniform_real_distribution<double> jitter(0.9, 1.1);

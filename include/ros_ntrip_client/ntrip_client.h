@@ -35,6 +35,7 @@ struct NtripClientConfig
   std::string tls_client_key_password;
   double connect_timeout_sec = 10.0;
   double read_timeout_sec = 10.0;
+  double session_start_timeout_sec = 15.0;
   double rtcm_timeout_sec = 4.0;
   bool adaptive_reconnect = true;
   int adaptive_burst_max_attempts = 12;
@@ -44,6 +45,9 @@ struct NtripClientConfig
   double reconnect_initial_delay_sec = 5.0;
   double reconnect_max_delay_sec = 300.0;
   double reconnect_backoff_multiplier = 2.0;
+  double transport_reconnect_initial_delay_sec = 1.0;
+  double transport_reconnect_max_delay_sec = 10.0;
+  double transport_reconnect_backoff_multiplier = 1.5;
   int max_attempts = 0;
   bool send_initial_gga = false;
 };
@@ -55,6 +59,13 @@ struct NtripClientCounters
   std::uint64_t crc_failures = 0U;
   std::uint64_t discarded_bytes = 0U;
   std::uint64_t buffer_trimmed_bytes = 0U;
+};
+
+enum class FailureCategory
+{
+  None,
+  Transport,
+  Service
 };
 
 class NtripClient
@@ -92,6 +103,7 @@ private:
   double computeAdaptiveMinimumDelaySec() const;
   bool sendRaw(int socket_fd, const std::string& bytes);
   double computeBackoffDelaySec(int attempt_number) const;
+  double computeTransportBackoffDelaySec(int attempt_number) const;
   void setStatus(const std::string& status) const;
 
   NtripClientConfig config_;
@@ -111,6 +123,7 @@ private:
   bool first_rtcm_frame_received_{false};
   bool stream_active_status_sent_{false};
   bool reconnect_state_reset_for_session_{false};
+  FailureCategory last_failure_category_{FailureCategory::None};
   std::chrono::steady_clock::time_point last_rtcm_frame_at_{};
   NtripClientCounters counters_;
   std::uint64_t session_bytes_received_{0U};

@@ -80,6 +80,11 @@ std::string statusCodeForMessage(const std::string& message)
   {
     return "REQUEST_FAILED";
   }
+  if (message.find("timed out waiting for caster response headers") == 0 ||
+      message.find("caster closed the connection before sending response headers") == 0)
+  {
+    return "TRANSPORT_HEADER_FAILED";
+  }
   if (message.find("failed to read response headers") == 0 ||
       message.find("incomplete response headers") == 0 ||
       message.find("response headers exceeded") == 0 ||
@@ -104,6 +109,10 @@ std::string statusCodeForMessage(const std::string& message)
   {
     return "RTCM_TIMEOUT";
   }
+  if (message.find("RTCM stream did not start within") == 0)
+  {
+    return "SESSION_START_TIMEOUT";
+  }
   if (message == "caster closed the connection")
   {
     return "STREAM_CLOSED";
@@ -117,7 +126,9 @@ std::string statusCodeForMessage(const std::string& message)
     return "SESSION_NO_VALID_RTCM";
   }
   if (message.find("stream disconnected, backing off for") == 0 ||
-      message.find("connect failed, backing off for") == 0)
+      message.find("connect failed, backing off for") == 0 ||
+      message.find("transport connect failed, backing off for") == 0 ||
+      message.find("transport stream disconnected, backing off for") == 0)
   {
     return "BACKOFF";
   }
@@ -237,6 +248,7 @@ int main(int argc, char** argv)
   pnh.param<std::string>("tls_client_key_password", config.tls_client_key_password, std::string());
   pnh.param("connect_timeout_sec", config.connect_timeout_sec, 10.0);
   pnh.param("read_timeout_sec", config.read_timeout_sec, 10.0);
+  pnh.param("session_start_timeout_sec", config.session_start_timeout_sec, 15.0);
   pnh.param("rtcm_timeout_sec", config.rtcm_timeout_sec, 4.0);
   pnh.param("adaptive_reconnect", config.adaptive_reconnect, true);
   pnh.param("adaptive_burst_max_attempts", config.adaptive_burst_max_attempts, 12);
@@ -246,6 +258,12 @@ int main(int argc, char** argv)
   pnh.param("reconnect_initial_delay_sec", config.reconnect_initial_delay_sec, 5.0);
   pnh.param("reconnect_max_delay_sec", config.reconnect_max_delay_sec, 300.0);
   pnh.param("reconnect_backoff_multiplier", config.reconnect_backoff_multiplier, 2.0);
+  pnh.param("transport_reconnect_initial_delay_sec",
+            config.transport_reconnect_initial_delay_sec, 1.0);
+  pnh.param("transport_reconnect_max_delay_sec",
+            config.transport_reconnect_max_delay_sec, 10.0);
+  pnh.param("transport_reconnect_backoff_multiplier",
+            config.transport_reconnect_backoff_multiplier, 1.5);
   pnh.param("max_attempts", config.max_attempts, 0);
   pnh.param("send_initial_gga", config.send_initial_gga, false);
 
