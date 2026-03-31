@@ -58,19 +58,19 @@ void NtripClient::processRtcmBytes(const std::uint8_t* data, std::size_t size)
   {
     std::lock_guard<std::mutex> lock(mutex_);
     counters_.bytes_received += static_cast<std::uint64_t>(size);
-    session_bytes_received_ += static_cast<std::uint64_t>(size);
+    session_.bytes_received += static_cast<std::uint64_t>(size);
   }
-  rtcm_buffer_.insert(rtcm_buffer_.end(), data, data + size);
-  if (rtcm_buffer_.size() > kMaxRtcmBufferSize)
+  session_.rtcm_buffer.insert(session_.rtcm_buffer.end(), data, data + size);
+  if (session_.rtcm_buffer.size() > kMaxRtcmBufferSize)
   {
     setStatus(StatusCode::RtcmBufferTrimmed, "RTCM parser buffer exceeded 10KB; trimming");
-    const std::size_t trimmed = rtcm_buffer_.size() - kMaxRtcmBufferSize;
+    const std::size_t trimmed = session_.rtcm_buffer.size() - kMaxRtcmBufferSize;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       counters_.buffer_trimmed_bytes += static_cast<std::uint64_t>(trimmed);
       counters_.discarded_bytes += static_cast<std::uint64_t>(trimmed);
     }
-    rtcm_buffer_.erase(rtcm_buffer_.begin(), rtcm_buffer_.begin() + trimmed);
+    session_.rtcm_buffer.erase(session_.rtcm_buffer.begin(), session_.rtcm_buffer.begin() + trimmed);
   }
 }
 
@@ -85,15 +85,15 @@ bool NtripClient::dispatchRtcmFrames()
     {
       std::lock_guard<std::mutex> lock(mutex_);
       counters_.frames_published += 1U;
-      session_frames_published_ += 1U;
-      last_rtcm_frame_at_ = std::chrono::steady_clock::now();
-      if (!first_rtcm_frame_received_)
+      session_.frames_published += 1U;
+      session_.last_rtcm_frame_at = std::chrono::steady_clock::now();
+      if (!session_.first_rtcm_frame_received)
       {
-        first_rtcm_frame_received_ = true;
+        session_.first_rtcm_frame_received = true;
       }
-      if (!stream_active_status_sent_)
+      if (!session_.stream_active_status_sent)
       {
-        stream_active_status_sent_ = true;
+        session_.stream_active_status_sent = true;
         emit_stream_active = true;
       }
     }
@@ -103,7 +103,7 @@ bool NtripClient::dispatchRtcmFrames()
       setStatus(StatusCode::StreamRecovered, "successful stream established; reconnect state reset");
       {
         std::lock_guard<std::mutex> lock(mutex_);
-        reconnect_state_reset_for_session_ = true;
+        session_.reconnect_state_reset = true;
       }
       setStatus(StatusCode::StreamActive, "RTCM stream active");
     }
@@ -114,33 +114,33 @@ bool NtripClient::dispatchRtcmFrames()
 
 bool NtripClient::extractRtcmFrame(std::vector<std::uint8_t>& frame)
 {
-  while (rtcm_buffer_.size() >= 3U)
+  while (session_.rtcm_buffer.size() >= 3U)
   {
-    if (rtcm_buffer_.front() != kRtcmPreamble)
+    if (session_.rtcm_buffer.front() != kRtcmPreamble)
     {
       {
         std::lock_guard<std::mutex> lock(mutex_);
         counters_.discarded_bytes += 1U;
       }
-      rtcm_buffer_.erase(rtcm_buffer_.begin());
+      session_.rtcm_buffer.erase(session_.rtcm_buffer.begin());
       continue;
     }
 
     const std::size_t message_length =
-        ((static_cast<std::size_t>(rtcm_buffer_[1]) << 8U) |
-         static_cast<std::size_t>(rtcm_buffer_[2])) & 0x03FFU;
+        ((static_cast<std::size_t>(session_.rtcm_buffer[1]) << 8U) |
+         static_cast<std::size_t>(session_.rtcm_buffer[2])) & 0x03FFU;
     const std::size_t packet_length = message_length + 6U;
-    if (rtcm_buffer_.size() < packet_length)
+    if (session_.rtcm_buffer.size() < packet_length)
     {
       return false;
     }
 
     const std::uint32_t expected_checksum =
-        (static_cast<std::uint32_t>(rtcm_buffer_[packet_length - 3U]) << 16U) |
-        (static_cast<std::uint32_t>(rtcm_buffer_[packet_length - 2U]) << 8U) |
-        static_cast<std::uint32_t>(rtcm_buffer_[packet_length - 1U]);
+        (static_cast<std::uint32_t>(session_.rtcm_buffer[packet_length - 3U]) << 16U) |
+        (static_cast<std::uint32_t>(session_.rtcm_buffer[packet_length - 2U]) << 8U) |
+        static_cast<std::uint32_t>(session_.rtcm_buffer[packet_length - 1U]);
     const std::uint32_t actual_checksum =
-        computeRtcmChecksum(rtcm_buffer_.data(), packet_length - 3U);
+        computeRtcmChecksum(session_.rtcm_buffer.data(), packet_length - 3U);
     if (expected_checksum != actual_checksum)
     {
       setStatus(StatusCode::RtcmCrcError, "discarding RTCM packet with invalid CRC");
@@ -149,12 +149,12 @@ bool NtripClient::extractRtcmFrame(std::vector<std::uint8_t>& frame)
         counters_.crc_failures += 1U;
         counters_.discarded_bytes += 1U;
       }
-      rtcm_buffer_.erase(rtcm_buffer_.begin());
+      session_.rtcm_buffer.erase(session_.rtcm_buffer.begin());
       continue;
     }
 
-    frame.assign(rtcm_buffer_.begin(), rtcm_buffer_.begin() + packet_length);
-    rtcm_buffer_.erase(rtcm_buffer_.begin(), rtcm_buffer_.begin() + packet_length);
+    frame.assign(session_.rtcm_buffer.begin(), session_.rtcm_buffer.begin() + packet_length);
+    session_.rtcm_buffer.erase(session_.rtcm_buffer.begin(), session_.rtcm_buffer.begin() + packet_length);
     return true;
   }
 

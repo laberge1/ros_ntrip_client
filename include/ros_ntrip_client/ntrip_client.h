@@ -123,6 +123,37 @@ public:
   NtripClientCounters getCounters() const;
 
 private:
+  struct TransportState
+  {
+    int socket_fd = -1;
+    SSL_CTX* ssl_ctx = nullptr;
+    SSL* ssl = nullptr;
+  };
+
+  struct SessionState
+  {
+    std::vector<std::uint8_t> rtcm_buffer;
+    bool first_rtcm_frame_received = false;
+    bool stream_active_status_sent = false;
+    bool reconnect_state_reset = false;
+    FailureCategory last_failure_category = FailureCategory::None;
+    std::chrono::steady_clock::time_point last_rtcm_frame_at{};
+    std::uint64_t bytes_received = 0U;
+    std::uint64_t frames_published = 0U;
+    std::string latest_gga_sentence;
+  };
+
+  struct ReconnectState
+  {
+    std::deque<std::chrono::steady_clock::time_point> recent_failure_attempts;
+    std::chrono::steady_clock::time_point failure_window_start{};
+    bool failure_window_active = false;
+    int display_attempts = 0;
+    int total_failed_cycles = 0;
+    int service_attempts = 0;
+    int transport_attempts = 0;
+  };
+
   void workerLoop();
   int connectToCaster();
   bool configureTlsForSocket(int socket_fd);
@@ -140,6 +171,7 @@ private:
   std::uint32_t computeRtcmChecksum(const std::uint8_t* data, std::size_t size) const;
   void recordFailureAttempt();
   void resetFailureTracking();
+  void resetSessionStateLocked();
   double computeAdaptiveMinimumDelaySec() const;
   bool sendRaw(int socket_fd, const std::string& bytes);
   double computeBackoffDelaySec(int attempt_number) const;
@@ -153,22 +185,10 @@ private:
   mutable std::mutex mutex_;
   std::thread worker_thread_;
   std::atomic<bool> running_{false};
-  int active_socket_{-1};
-  SSL_CTX* active_ssl_ctx_{nullptr};
-  SSL* active_ssl_{nullptr};
-  std::vector<std::uint8_t> rtcm_buffer_;
-  std::deque<std::chrono::steady_clock::time_point> recent_failure_attempts_;
-  std::chrono::steady_clock::time_point failure_window_start_{};
-  bool failure_window_active_{false};
-  bool first_rtcm_frame_received_{false};
-  bool stream_active_status_sent_{false};
-  bool reconnect_state_reset_for_session_{false};
-  FailureCategory last_failure_category_{FailureCategory::None};
-  std::chrono::steady_clock::time_point last_rtcm_frame_at_{};
   NtripClientCounters counters_;
-  std::uint64_t session_bytes_received_{0U};
-  std::uint64_t session_frames_published_{0U};
-  std::string latest_gga_sentence_;
+  TransportState transport_;
+  SessionState session_;
+  ReconnectState reconnect_;
 };
 
 }  // namespace ros_ntrip_client

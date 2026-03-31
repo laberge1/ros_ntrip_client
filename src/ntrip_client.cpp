@@ -24,7 +24,7 @@ constexpr ssize_t kReadTimeoutResult = -2;
 NtripClient::NtripClient(NtripClientConfig config)
   : config_(std::move(config))
 {
-  rtcm_buffer_.reserve(kMaxRtcmBufferSize);
+  session_.rtcm_buffer.reserve(kMaxRtcmBufferSize);
 }
 
 NtripClient::~NtripClient()
@@ -61,7 +61,7 @@ void NtripClient::stop()
   if (was_running)
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    socket_to_close = active_socket_;
+    socket_to_close = transport_.socket_fd;
   }
 
   if (was_running && socket_to_close >= 0)
@@ -81,10 +81,10 @@ void NtripClient::updateGgaSentence(const std::string& gga_sentence)
   int socket_fd = -1;
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    latest_gga_sentence_ = gga_sentence;
-    if (active_socket_ >= 0)
+    session_.latest_gga_sentence = gga_sentence;
+    if (transport_.socket_fd >= 0)
     {
-      socket_fd = active_socket_;
+      socket_fd = transport_.socket_fd;
     }
   }
 
@@ -102,31 +102,35 @@ NtripClientCounters NtripClient::getCounters() const
 
 void NtripClient::workerLoop()
 {
-  int display_attempts = 0;
-  int total_failed_cycles = 0;
-  int service_attempts = 0;
-  int transport_attempts = 0;
-
   while (running_)
   {
-    if (config_.max_attempts > 0 && total_failed_cycles >= config_.max_attempts)
+    int display_attempt = 0;
     {
-      setStatus(StatusCode::StoppedMaxAttempts, "maximum connection attempts reached");
-      break;
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (config_.max_attempts > 0 && reconnect_.total_failed_cycles >= config_.max_attempts)
+      {
+        setStatus(StatusCode::StoppedMaxAttempts, "maximum connection attempts reached");
+        break;
+      }
+      ++reconnect_.display_attempts;
+      display_attempt = reconnect_.display_attempts;
     }
 
-    ++display_attempts;
     std::ostringstream attempt_msg;
-    attempt_msg << "connection attempt " << display_attempts;
+    attempt_msg << "connection attempt " << display_attempt;
     setStatus(StatusCode::Connecting, attempt_msg.str());
 
     int socket_fd = connectToCaster();
     if (socket_fd < 0)
     {
-      ++total_failed_cycles;
-      ++transport_attempts;
-      service_attempts = 0;
-      const double delay_sec = computeTransportBackoffDelaySec(transport_attempts);
+      double delay_sec = 0.0;
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ++reconnect_.total_failed_cycles;
+        ++reconnect_.transport_attempts;
+        reconnect_.service_attempts = 0;
+        delay_sec = computeTransportBackoffDelaySec(reconnect_.transport_attempts);
+      }
       std::ostringstream msg;
       msg << "transport connect failed, backing off for " << std::fixed << std::setprecision(2)
           << delay_sec << "s";
@@ -140,16 +144,9 @@ void NtripClient::workerLoop()
 
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      active_socket_ = socket_fd;
-      first_rtcm_frame_received_ = false;
-      stream_active_status_sent_ = false;
-      reconnect_state_reset_for_session_ = false;
-      last_failure_category_ = FailureCategory::None;
-      last_rtcm_frame_at_ = std::chrono::steady_clock::time_point{};
-      session_bytes_received_ = 0U;
-      session_frames_published_ = 0U;
+      transport_.socket_fd = socket_fd;
+      resetSessionStateLocked();
     }
-    rtcm_buffer_.clear();
 
     const bool request_sent = sendRequest(socket_fd);
     std::string headers;
@@ -157,17 +154,17 @@ void NtripClient::workerLoop()
     const bool streamed_ok = response_ok && streamData(socket_fd);
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (reconnect_state_reset_for_session_)
+      if (session_.reconnect_state_reset)
       {
-        total_failed_cycles = 0;
-        service_attempts = 0;
-        transport_attempts = 0;
+        reconnect_.total_failed_cycles = 0;
+        reconnect_.service_attempts = 0;
+        reconnect_.transport_attempts = 0;
       }
     }
 
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (active_socket_ == socket_fd)
+      if (transport_.socket_fd == socket_fd)
       {
         cleanupActiveTransportLocked();
       }
@@ -181,30 +178,36 @@ void NtripClient::workerLoop()
     if (!streamed_ok)
     {
       FailureCategory failure_category = FailureCategory::Service;
+      double delay_sec = 0.0;
       {
         std::lock_guard<std::mutex> lock(mutex_);
-        failure_category = last_failure_category_;
-      }
+        failure_category = session_.last_failure_category;
 
-      ++total_failed_cycles;
-      double delay_sec = 0.0;
+        ++reconnect_.total_failed_cycles;
+        if (failure_category == FailureCategory::Transport)
+        {
+          ++reconnect_.transport_attempts;
+          reconnect_.service_attempts = 0;
+          delay_sec = computeTransportBackoffDelaySec(reconnect_.transport_attempts);
+        }
+        else
+        {
+          ++reconnect_.service_attempts;
+          reconnect_.transport_attempts = 0;
+          recordFailureAttempt();
+          delay_sec = std::max(computeBackoffDelaySec(reconnect_.service_attempts),
+                               computeAdaptiveMinimumDelaySec());
+        }
+      }
       std::ostringstream msg;
 
       if (failure_category == FailureCategory::Transport)
       {
-        ++transport_attempts;
-        service_attempts = 0;
-        delay_sec = computeTransportBackoffDelaySec(transport_attempts);
         msg << "transport stream disconnected, backing off for " << std::fixed
             << std::setprecision(2) << delay_sec << "s";
       }
       else
       {
-        ++service_attempts;
-        transport_attempts = 0;
-        recordFailureAttempt();
-        delay_sec = std::max(computeBackoffDelaySec(service_attempts),
-                             computeAdaptiveMinimumDelaySec());
         msg << "stream disconnected, backing off for " << std::fixed << std::setprecision(2)
             << delay_sec << "s";
       }
@@ -221,6 +224,18 @@ void NtripClient::workerLoop()
   running_ = false;
 }
 
+void NtripClient::resetSessionStateLocked()
+{
+  session_.first_rtcm_frame_received = false;
+  session_.stream_active_status_sent = false;
+  session_.reconnect_state_reset = false;
+  session_.last_failure_category = FailureCategory::None;
+  session_.last_rtcm_frame_at = std::chrono::steady_clock::time_point{};
+  session_.bytes_received = 0U;
+  session_.frames_published = 0U;
+  session_.rtcm_buffer.clear();
+}
+
 bool NtripClient::streamData(int socket_fd)
 {
   std::array<std::uint8_t, 4096> buffer{};
@@ -235,8 +250,8 @@ bool NtripClient::streamData(int socket_fd)
       std::chrono::steady_clock::time_point last_rtcm_at;
       {
         std::lock_guard<std::mutex> lock(mutex_);
-        first_rtcm_received = first_rtcm_frame_received_;
-        last_rtcm_at = last_rtcm_frame_at_;
+        first_rtcm_received = session_.first_rtcm_frame_received;
+        last_rtcm_at = session_.last_rtcm_frame_at;
       }
 
       const auto now = std::chrono::steady_clock::now();
@@ -247,7 +262,7 @@ bool NtripClient::streamData(int socket_fd)
         {
           {
             std::lock_guard<std::mutex> lock(mutex_);
-            last_failure_category_ = FailureCategory::Service;
+            session_.last_failure_category = FailureCategory::Service;
           }
           std::ostringstream msg;
           msg << "RTCM data not received for " << std::fixed << std::setprecision(2)
@@ -263,7 +278,7 @@ bool NtripClient::streamData(int socket_fd)
         {
           {
             std::lock_guard<std::mutex> lock(mutex_);
-            last_failure_category_ = FailureCategory::Service;
+            session_.last_failure_category = FailureCategory::Service;
           }
           std::ostringstream msg;
           msg << "RTCM stream did not start within " << std::fixed << std::setprecision(2)
@@ -280,8 +295,8 @@ bool NtripClient::streamData(int socket_fd)
       std::uint64_t session_frames_published = 0U;
       {
         std::lock_guard<std::mutex> lock(mutex_);
-        session_bytes_received = session_bytes_received_;
-        session_frames_published = session_frames_published_;
+        session_bytes_received = session_.bytes_received;
+        session_frames_published = session_.frames_published;
       }
 
       if (session_frames_published == 0U)
@@ -290,7 +305,7 @@ bool NtripClient::streamData(int socket_fd)
         {
           {
             std::lock_guard<std::mutex> lock(mutex_);
-            last_failure_category_ = FailureCategory::Service;
+            session_.last_failure_category = FailureCategory::Service;
           }
           setStatus(StatusCode::SessionEmpty, "caster accepted session but closed before sending any stream data");
         }
@@ -298,7 +313,7 @@ bool NtripClient::streamData(int socket_fd)
         {
           {
             std::lock_guard<std::mutex> lock(mutex_);
-            last_failure_category_ = FailureCategory::Service;
+            session_.last_failure_category = FailureCategory::Service;
           }
           setStatus(StatusCode::SessionNoValidRtcm, "caster accepted session but no valid RTCM frames were received before close");
         }
@@ -307,7 +322,7 @@ bool NtripClient::streamData(int socket_fd)
       {
         {
           std::lock_guard<std::mutex> lock(mutex_);
-          last_failure_category_ = FailureCategory::Transport;
+          session_.last_failure_category = FailureCategory::Transport;
         }
         setStatus(StatusCode::StreamClosed, "caster closed the connection");
       }
@@ -317,7 +332,7 @@ bool NtripClient::streamData(int socket_fd)
     {
       {
         std::lock_guard<std::mutex> lock(mutex_);
-        last_failure_category_ = FailureCategory::Transport;
+        session_.last_failure_category = FailureCategory::Transport;
       }
       setStatus(StatusCode::ReadFailed, "stream read failed");
       return false;
@@ -348,25 +363,25 @@ void NtripClient::recordFailureAttempt()
   }
 
   const auto now = std::chrono::steady_clock::now();
-  if (!failure_window_active_)
+  if (!reconnect_.failure_window_active)
   {
-    failure_window_start_ = now;
-    failure_window_active_ = true;
+    reconnect_.failure_window_start = now;
+    reconnect_.failure_window_active = true;
   }
 
-  recent_failure_attempts_.push_back(now);
+  reconnect_.recent_failure_attempts.push_back(now);
   const auto burst_window = std::chrono::duration<double>(config_.adaptive_burst_window_sec);
-  while (!recent_failure_attempts_.empty() &&
-         (now - recent_failure_attempts_.front()) > burst_window)
+  while (!reconnect_.recent_failure_attempts.empty() &&
+         (now - reconnect_.recent_failure_attempts.front()) > burst_window)
   {
-    recent_failure_attempts_.pop_front();
+    reconnect_.recent_failure_attempts.pop_front();
   }
 }
 
 void NtripClient::resetFailureTracking()
 {
-  recent_failure_attempts_.clear();
-  failure_window_active_ = false;
+  reconnect_.recent_failure_attempts.clear();
+  reconnect_.failure_window_active = false;
 }
 
 double NtripClient::computeAdaptiveMinimumDelaySec() const
@@ -380,17 +395,17 @@ double NtripClient::computeAdaptiveMinimumDelaySec() const
   double minimum_delay_sec = 0.0;
 
   if (config_.adaptive_burst_max_attempts > 0 &&
-      static_cast<int>(recent_failure_attempts_.size()) >= config_.adaptive_burst_max_attempts)
+      static_cast<int>(reconnect_.recent_failure_attempts.size()) >= config_.adaptive_burst_max_attempts)
   {
-    const auto oldest = recent_failure_attempts_.front();
+    const auto oldest = reconnect_.recent_failure_attempts.front();
     const std::chrono::duration<double> elapsed = now - oldest;
     minimum_delay_sec = std::max(minimum_delay_sec,
                                  config_.adaptive_burst_window_sec - elapsed.count());
   }
 
-  if (failure_window_active_)
+  if (reconnect_.failure_window_active)
   {
-    const std::chrono::duration<double> failed_for = now - failure_window_start_;
+    const std::chrono::duration<double> failed_for = now - reconnect_.failure_window_start;
     if (failed_for.count() >= config_.adaptive_slow_after_sec)
     {
       minimum_delay_sec = std::max(minimum_delay_sec, config_.adaptive_slow_interval_sec);
@@ -405,11 +420,11 @@ bool NtripClient::sendCurrentGga(int socket_fd)
   std::string sentence;
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (latest_gga_sentence_.empty())
+    if (session_.latest_gga_sentence.empty())
     {
       return false;
     }
-    sentence = latest_gga_sentence_;
+    sentence = session_.latest_gga_sentence;
   }
 
   if (sentence.empty())

@@ -264,7 +264,7 @@ int NtripClient::connectToCaster()
     {
       {
         std::lock_guard<std::mutex> lock(mutex_);
-        active_socket_ = socket_fd;
+        transport_.socket_fd = socket_fd;
       }
 
       if (!configureTlsForSocket(socket_fd))
@@ -420,8 +420,8 @@ bool NtripClient::configureTlsForSocket(int socket_fd)
 
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    active_ssl_ctx_ = ssl_ctx;
-    active_ssl_ = ssl;
+    transport_.ssl_ctx = ssl_ctx;
+    transport_.ssl = ssl;
   }
 
   setStatus(StatusCode::TlsEstablished, "TLS session established");
@@ -430,13 +430,13 @@ bool NtripClient::configureTlsForSocket(int socket_fd)
 
 void NtripClient::cleanupActiveTransportLocked()
 {
-  SSL* ssl = active_ssl_;
-  SSL_CTX* ssl_ctx = active_ssl_ctx_;
-  const int socket_fd = active_socket_;
+  SSL* ssl = transport_.ssl;
+  SSL_CTX* ssl_ctx = transport_.ssl_ctx;
+  const int socket_fd = transport_.socket_fd;
 
-  active_ssl_ = nullptr;
-  active_ssl_ctx_ = nullptr;
-  active_socket_ = -1;
+  transport_.ssl = nullptr;
+  transport_.ssl_ctx = nullptr;
+  transport_.socket_fd = -1;
 
   if (ssl != nullptr)
   {
@@ -476,7 +476,7 @@ bool NtripClient::sendRequest(int socket_fd)
   {
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      last_failure_category_ = FailureCategory::Transport;
+      session_.last_failure_category = FailureCategory::Transport;
     }
     setStatus(StatusCode::RequestFailed, "failed to send NTRIP request");
     return false;
@@ -498,7 +498,7 @@ bool NtripClient::readResponseHeaders(int socket_fd, std::string& headers)
     {
       {
         std::lock_guard<std::mutex> lock(mutex_);
-        last_failure_category_ = FailureCategory::Transport;
+        session_.last_failure_category = FailureCategory::Transport;
       }
       setStatus(StatusCode::TransportHeaderFailed, "timed out waiting for caster response headers");
       return false;
@@ -507,7 +507,7 @@ bool NtripClient::readResponseHeaders(int socket_fd, std::string& headers)
     {
       {
         std::lock_guard<std::mutex> lock(mutex_);
-        last_failure_category_ = FailureCategory::Transport;
+        session_.last_failure_category = FailureCategory::Transport;
       }
       setStatus(StatusCode::TransportHeaderFailed, "caster closed the connection before sending response headers");
       return false;
@@ -516,7 +516,7 @@ bool NtripClient::readResponseHeaders(int socket_fd, std::string& headers)
     {
       {
         std::lock_guard<std::mutex> lock(mutex_);
-        last_failure_category_ = FailureCategory::Transport;
+        session_.last_failure_category = FailureCategory::Transport;
       }
       setStatus(StatusCode::TransportHeaderFailed, "failed to read response headers");
       return false;
@@ -526,7 +526,7 @@ bool NtripClient::readResponseHeaders(int socket_fd, std::string& headers)
     {
       {
         std::lock_guard<std::mutex> lock(mutex_);
-        last_failure_category_ = FailureCategory::Service;
+        session_.last_failure_category = FailureCategory::Service;
       }
       setStatus(StatusCode::ProtocolError, std::string("response headers exceeded 8KB: ") +
                 sanitizeSnippet(headers, 200U));
@@ -539,7 +539,7 @@ bool NtripClient::readResponseHeaders(int socket_fd, std::string& headers)
   {
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      last_failure_category_ = FailureCategory::Service;
+      session_.last_failure_category = FailureCategory::Service;
     }
     setStatus(StatusCode::ProtocolError, "incomplete response headers");
     return false;
@@ -551,7 +551,7 @@ bool NtripClient::readResponseHeaders(int socket_fd, std::string& headers)
   {
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      last_failure_category_ = FailureCategory::Service;
+      session_.last_failure_category = FailureCategory::Service;
     }
     if (containsAny(header_block, {"SOURCETABLE 200 OK"}))
     {
@@ -622,9 +622,9 @@ ssize_t NtripClient::readSome(int socket_fd, void* buffer, std::size_t buffer_si
   SSL* ssl = nullptr;
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (active_socket_ == socket_fd)
+    if (transport_.socket_fd == socket_fd)
     {
-      ssl = active_ssl_;
+      ssl = transport_.ssl;
     }
   }
 
@@ -685,9 +685,9 @@ ssize_t NtripClient::writeSome(int socket_fd, const void* buffer, std::size_t bu
   SSL* ssl = nullptr;
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (active_socket_ == socket_fd)
+    if (transport_.socket_fd == socket_fd)
     {
-      ssl = active_ssl_;
+      ssl = transport_.ssl;
     }
   }
 
