@@ -84,7 +84,7 @@ NodeConfig loadNodeConfig(ros::NodeHandle& private_nh)
   private_nh.param("read_timeout_sec", config.client_config.read_timeout_sec, 10.0);
   private_nh.param(
       "session_start_timeout_sec", config.client_config.session_start_timeout_sec, 15.0);
-  private_nh.param("rtcm_timeout_sec", config.client_config.rtcm_timeout_sec, 4.0);
+  private_nh.param("rtcm_timeout_sec", config.client_config.rtcm_timeout_sec, 10.0);
   private_nh.param("adaptive_reconnect", config.client_config.adaptive_reconnect, true);
   private_nh.param(
       "adaptive_burst_max_attempts", config.client_config.adaptive_burst_max_attempts, 12);
@@ -102,7 +102,7 @@ NodeConfig loadNodeConfig(ros::NodeHandle& private_nh)
       "reconnect_backoff_multiplier", config.client_config.reconnect_backoff_multiplier, 2.0);
   private_nh.param("transport_reconnect_initial_delay_sec",
                     config.client_config.transport_reconnect_initial_delay_sec,
-                    1.0);
+                    5.0);
   private_nh.param("transport_reconnect_max_delay_sec",
                     config.client_config.transport_reconnect_max_delay_sec,
                     10.0);
@@ -110,15 +110,21 @@ NodeConfig loadNodeConfig(ros::NodeHandle& private_nh)
                     config.client_config.transport_reconnect_backoff_multiplier,
                     1.5);
   private_nh.param("max_attempts", config.client_config.max_attempts, 0);
-  private_nh.param("send_initial_gga", config.client_config.send_initial_gga, false);
+  private_nh.param("send_initial_gga", config.client_config.send_initial_gga, true);
 
   private_nh.param<std::string>("gga_topic", config.gga_topic, std::string("nmea"));
   private_nh.param<std::string>("rtcm_frame_id", config.rtcm_frame_id, std::string());
   private_nh.param("use_fixed_gga_position", config.use_fixed_gga_position, false);
-  private_nh.param("gga_send_interval_sec", config.gga_send_interval_sec, 0.0);
+  private_nh.param("gga_send_interval_sec", config.gga_send_interval_sec, 10.0);
   private_nh.param("fixed_latitude_deg", config.fixed_latitude_deg, 0.0);
   private_nh.param("fixed_longitude_deg", config.fixed_longitude_deg, 0.0);
   private_nh.param("fixed_altitude_m", config.fixed_altitude_m, 0.0);
+
+  if (config.use_fixed_gga_position)
+  {
+    config.client_config.initial_gga_sentence = positionToGga(
+        config.fixed_latitude_deg, config.fixed_longitude_deg, config.fixed_altitude_m);
+  }
 
   return config;
 }
@@ -127,7 +133,8 @@ std::string positionToGga(double latitude, double longitude, double altitude)
 {
   const ros::Time stamp = ros::Time::now();
   const std::time_t seconds = static_cast<std::time_t>(stamp.sec);
-  const std::tm utc = *std::gmtime(&seconds);
+  std::tm utc{};
+  gmtime_r(&seconds, &utc);
 
   std::ostringstream time_stream;
   time_stream << std::setw(2) << std::setfill('0') << utc.tm_hour

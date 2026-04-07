@@ -85,7 +85,7 @@ int main(int argc, char** argv)
   std::unique_ptr<ros::Timer> gga_timer;
   if (node_config.gga_send_interval_sec > 0.0)
   {
-    gga_timer.reset(new ros::Timer(
+    gga_timer = std::make_unique<ros::Timer>(
         nh.createTimer(ros::Duration(node_config.gga_send_interval_sec),
                        [&, latest_gga, latest_gga_mutex](const ros::TimerEvent&)
                        {

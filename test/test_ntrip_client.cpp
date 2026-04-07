@@ -1,6 +1,4 @@
-#define private public
 #include "ros_ntrip_client/ntrip_client.h"
-#undef private
 
 #include <gtest/gtest.h>
 
@@ -28,6 +26,16 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+class NtripClientTestAccess
+{
+public:
+  static void processRtcmBytes(ros_ntrip_client::NtripClient& client,
+                               const std::uint8_t* data, std::size_t size)
+  {
+    client.processRtcmBytes(data, size);
+  }
+};
 
 namespace
 {
@@ -458,7 +466,6 @@ void expectResponseClassification(
 
   std::mutex status_mutex;
   std::vector<std::string> statuses;
-  std::mutex code_mutex;
   std::vector<StatusCode> codes;
 
   ASSERT_TRUE(client.start(
@@ -467,7 +474,6 @@ void expectResponseClassification(
       {
         std::lock_guard<std::mutex> lock(status_mutex);
         statuses.push_back(status.message);
-        std::lock_guard<std::mutex> code_lock(code_mutex);
         codes.push_back(status.code);
       }));
 
@@ -481,7 +487,7 @@ void expectResponseClassification(
   client.stop();
   caster.stop();
 
-  const std::vector<StatusCode> copied_codes = copyStatusCodes(codes, code_mutex);
+  const std::vector<StatusCode> copied_codes = copyStatusCodes(codes, status_mutex);
   EXPECT_TRUE(containsStatusCode(copied_codes, expected_code));
   const std::vector<std::string> copied_statuses = copyStatuses(statuses, status_mutex);
   EXPECT_TRUE(containsStatus(copied_statuses, expected_message_snippet));
@@ -755,7 +761,6 @@ TEST(NtripClientTest, PublishesRtcmAndTransitionsToStreamActive)
 
   std::mutex status_mutex;
   std::vector<std::string> statuses;
-  std::mutex code_mutex;
   std::vector<StatusCode> codes;
   std::mutex data_mutex;
   std::vector<std::vector<std::uint8_t>> frames;
@@ -770,7 +775,6 @@ TEST(NtripClientTest, PublishesRtcmAndTransitionsToStreamActive)
       {
         std::lock_guard<std::mutex> lock(status_mutex);
         statuses.push_back(status.message);
-        std::lock_guard<std::mutex> code_lock(code_mutex);
         codes.push_back(status.code);
       }));
 
@@ -790,7 +794,7 @@ TEST(NtripClientTest, PublishesRtcmAndTransitionsToStreamActive)
   }
 
   const std::vector<std::string> copied_statuses = copyStatuses(statuses, status_mutex);
-  const std::vector<StatusCode> copied_codes = copyStatusCodes(codes, code_mutex);
+  const std::vector<StatusCode> copied_codes = copyStatusCodes(codes, status_mutex);
   EXPECT_TRUE(containsStatusCode(copied_codes, StatusCode::SessionAccepted));
   EXPECT_TRUE(containsStatusCode(copied_codes, StatusCode::StreamActive));
   EXPECT_TRUE(containsStatus(copied_statuses, "caster accepted stream"));
@@ -814,7 +818,6 @@ TEST(NtripClientTest, TimesOutWaitingForHeaders)
 
   std::mutex status_mutex;
   std::vector<std::string> statuses;
-  std::mutex code_mutex;
   std::vector<StatusCode> codes;
 
   ASSERT_TRUE(client.start(
@@ -823,7 +826,6 @@ TEST(NtripClientTest, TimesOutWaitingForHeaders)
       {
         std::lock_guard<std::mutex> lock(status_mutex);
         statuses.push_back(status.message);
-        std::lock_guard<std::mutex> code_lock(code_mutex);
         codes.push_back(status.code);
       }));
 
@@ -836,7 +838,7 @@ TEST(NtripClientTest, TimesOutWaitingForHeaders)
   client.stop();
   caster.stop();
 
-  const std::vector<StatusCode> copied_codes = copyStatusCodes(codes, code_mutex);
+  const std::vector<StatusCode> copied_codes = copyStatusCodes(codes, status_mutex);
   EXPECT_TRUE(containsStatusCode(copied_codes, StatusCode::TransportHeaderFailed));
   const std::vector<std::string> copied_statuses = copyStatuses(statuses, status_mutex);
   EXPECT_TRUE(containsStatus(copied_statuses, "timed out waiting for caster response headers"));
@@ -898,7 +900,6 @@ TEST(NtripClientTest, TimesOutWhenSessionDoesNotProduceFirstRtcmFrame)
 
   std::mutex status_mutex;
   std::vector<std::string> statuses;
-  std::mutex code_mutex;
   std::vector<StatusCode> codes;
 
   ASSERT_TRUE(client.start(
@@ -907,7 +908,6 @@ TEST(NtripClientTest, TimesOutWhenSessionDoesNotProduceFirstRtcmFrame)
       {
         std::lock_guard<std::mutex> lock(status_mutex);
         statuses.push_back(status.message);
-        std::lock_guard<std::mutex> code_lock(code_mutex);
         codes.push_back(status.code);
       }));
 
@@ -920,7 +920,7 @@ TEST(NtripClientTest, TimesOutWhenSessionDoesNotProduceFirstRtcmFrame)
   client.stop();
   caster.stop();
 
-  const std::vector<StatusCode> copied_codes = copyStatusCodes(codes, code_mutex);
+  const std::vector<StatusCode> copied_codes = copyStatusCodes(codes, status_mutex);
   EXPECT_TRUE(containsStatusCode(copied_codes, StatusCode::SessionAccepted));
   EXPECT_TRUE(containsStatusCode(copied_codes, StatusCode::SessionStartTimeout));
   const std::vector<std::string> copied_statuses = copyStatuses(statuses, status_mutex);
@@ -944,7 +944,6 @@ TEST(NtripClientTest, ReportsAcceptedButEmptySession)
 
   std::mutex status_mutex;
   std::vector<std::string> statuses;
-  std::mutex code_mutex;
   std::vector<StatusCode> codes;
 
   ASSERT_TRUE(client.start(
@@ -953,7 +952,6 @@ TEST(NtripClientTest, ReportsAcceptedButEmptySession)
       {
         std::lock_guard<std::mutex> lock(status_mutex);
         statuses.push_back(status.message);
-        std::lock_guard<std::mutex> code_lock(code_mutex);
         codes.push_back(status.code);
       }));
 
@@ -968,7 +966,7 @@ TEST(NtripClientTest, ReportsAcceptedButEmptySession)
   client.stop();
   caster.stop();
 
-  const std::vector<StatusCode> copied_codes = copyStatusCodes(codes, code_mutex);
+  const std::vector<StatusCode> copied_codes = copyStatusCodes(codes, status_mutex);
   EXPECT_TRUE(containsStatusCode(copied_codes, StatusCode::SessionEmpty));
   const std::vector<std::string> copied_statuses = copyStatuses(statuses, status_mutex);
   EXPECT_TRUE(containsStatus(
@@ -998,7 +996,6 @@ TEST(NtripClientTest, TimesOutAfterActiveStreamStopsDeliveringRtcm)
 
   std::mutex status_mutex;
   std::vector<std::string> statuses;
-  std::mutex code_mutex;
   std::vector<StatusCode> codes;
 
   ASSERT_TRUE(client.start(
@@ -1007,7 +1004,6 @@ TEST(NtripClientTest, TimesOutAfterActiveStreamStopsDeliveringRtcm)
       {
         std::lock_guard<std::mutex> lock(status_mutex);
         statuses.push_back(status.message);
-        std::lock_guard<std::mutex> code_lock(code_mutex);
         codes.push_back(status.code);
       }));
 
@@ -1020,7 +1016,7 @@ TEST(NtripClientTest, TimesOutAfterActiveStreamStopsDeliveringRtcm)
   client.stop();
   caster.stop();
 
-  const std::vector<StatusCode> copied_codes = copyStatusCodes(codes, code_mutex);
+  const std::vector<StatusCode> copied_codes = copyStatusCodes(codes, status_mutex);
   EXPECT_TRUE(containsStatusCode(copied_codes, StatusCode::StreamActive));
   EXPECT_TRUE(containsStatusCode(copied_codes, StatusCode::RtcmTimeout));
   EXPECT_TRUE(containsStatusCode(copied_codes, StatusCode::Backoff));
@@ -1049,7 +1045,6 @@ TEST(NtripClientTest, ReportsNoValidRtcmWhenStreamContainsNonRtcmBytes)
 
   std::mutex status_mutex;
   std::vector<std::string> statuses;
-  std::mutex code_mutex;
   std::vector<StatusCode> codes;
 
   ASSERT_TRUE(client.start(
@@ -1058,7 +1053,6 @@ TEST(NtripClientTest, ReportsNoValidRtcmWhenStreamContainsNonRtcmBytes)
       {
         std::lock_guard<std::mutex> lock(status_mutex);
         statuses.push_back(status.message);
-        std::lock_guard<std::mutex> code_lock(code_mutex);
         codes.push_back(status.code);
       }));
 
@@ -1073,7 +1067,7 @@ TEST(NtripClientTest, ReportsNoValidRtcmWhenStreamContainsNonRtcmBytes)
   client.stop();
   caster.stop();
 
-  const std::vector<StatusCode> copied_codes = copyStatusCodes(codes, code_mutex);
+  const std::vector<StatusCode> copied_codes = copyStatusCodes(codes, status_mutex);
   EXPECT_TRUE(containsStatusCode(copied_codes, StatusCode::SessionNoValidRtcm));
   const ros_ntrip_client::NtripClientCounters counters = client.getCounters();
   EXPECT_GT(counters.bytes_received, 0U);
@@ -1118,7 +1112,6 @@ TEST(NtripClientTest, ResetsFailureStateAfterHealthyStreamAndUsesTransportBackof
 
   std::mutex status_mutex;
   std::vector<std::string> statuses;
-  std::mutex code_mutex;
   std::vector<StatusCode> codes;
 
   ASSERT_TRUE(client.start(
@@ -1127,7 +1120,6 @@ TEST(NtripClientTest, ResetsFailureStateAfterHealthyStreamAndUsesTransportBackof
       {
         std::lock_guard<std::mutex> lock(status_mutex);
         statuses.push_back(status.message);
-        std::lock_guard<std::mutex> code_lock(code_mutex);
         codes.push_back(status.code);
       }));
 
@@ -1140,7 +1132,7 @@ TEST(NtripClientTest, ResetsFailureStateAfterHealthyStreamAndUsesTransportBackof
   client.stop();
   caster.stop();
 
-  const std::vector<StatusCode> copied_codes = copyStatusCodes(codes, code_mutex);
+  const std::vector<StatusCode> copied_codes = copyStatusCodes(codes, status_mutex);
   EXPECT_GE(countStatusCodes(copied_codes, StatusCode::StreamRecovered), 2U);
   EXPECT_GE(countStatusCodes(copied_codes, StatusCode::StreamActive), 2U);
   EXPECT_TRUE(containsStatusCode(copied_codes, StatusCode::Backoff));
@@ -1158,7 +1150,6 @@ TEST(NtripClientTest, MaxAttemptsAppliesToRepeatedTransportFailures)
 
   std::mutex status_mutex;
   std::vector<std::string> statuses;
-  std::mutex code_mutex;
   std::vector<StatusCode> codes;
 
   ASSERT_TRUE(client.start(
@@ -1167,7 +1158,6 @@ TEST(NtripClientTest, MaxAttemptsAppliesToRepeatedTransportFailures)
       {
         std::lock_guard<std::mutex> lock(status_mutex);
         statuses.push_back(status.message);
-        std::lock_guard<std::mutex> code_lock(code_mutex);
         codes.push_back(status.code);
       }));
 
@@ -1180,7 +1170,7 @@ TEST(NtripClientTest, MaxAttemptsAppliesToRepeatedTransportFailures)
 
   client.stop();
 
-  const std::vector<StatusCode> copied_codes = copyStatusCodes(codes, code_mutex);
+  const std::vector<StatusCode> copied_codes = copyStatusCodes(codes, status_mutex);
   EXPECT_EQ(countStatusCodes(copied_codes, StatusCode::Connecting), 2U);
   EXPECT_TRUE(containsStatusCode(copied_codes, StatusCode::StoppedMaxAttempts));
   const std::vector<std::string> copied_statuses = copyStatuses(statuses, status_mutex);
@@ -1695,7 +1685,6 @@ TEST(NtripClientTest, ReportsTlsHandshakeFailureAgainstPlainTcpCaster)
 
   std::mutex status_mutex;
   std::vector<std::string> statuses;
-  std::mutex code_mutex;
   std::vector<StatusCode> codes;
 
   ASSERT_TRUE(client.start(
@@ -1704,7 +1693,6 @@ TEST(NtripClientTest, ReportsTlsHandshakeFailureAgainstPlainTcpCaster)
       {
         std::lock_guard<std::mutex> lock(status_mutex);
         statuses.push_back(status.message);
-        std::lock_guard<std::mutex> code_lock(code_mutex);
         codes.push_back(status.code);
       }));
 
@@ -1718,7 +1706,7 @@ TEST(NtripClientTest, ReportsTlsHandshakeFailureAgainstPlainTcpCaster)
   client.stop();
   caster.stop();
 
-  const std::vector<StatusCode> copied_codes = copyStatusCodes(codes, code_mutex);
+  const std::vector<StatusCode> copied_codes = copyStatusCodes(codes, status_mutex);
   EXPECT_TRUE(containsStatusCode(copied_codes, StatusCode::TlsError));
 }
 
@@ -1740,7 +1728,6 @@ TEST(NtripClientTest, RejectsPartialMtlsConfiguration)
 
   std::mutex status_mutex;
   std::vector<std::string> statuses;
-  std::mutex code_mutex;
   std::vector<StatusCode> codes;
 
   ASSERT_TRUE(client.start(
@@ -1749,7 +1736,6 @@ TEST(NtripClientTest, RejectsPartialMtlsConfiguration)
       {
         std::lock_guard<std::mutex> lock(status_mutex);
         statuses.push_back(status.message);
-        std::lock_guard<std::mutex> code_lock(code_mutex);
         codes.push_back(status.code);
       }));
 
@@ -1765,7 +1751,7 @@ TEST(NtripClientTest, RejectsPartialMtlsConfiguration)
   client.stop();
   caster.stop();
 
-  const std::vector<StatusCode> copied_codes = copyStatusCodes(codes, code_mutex);
+  const std::vector<StatusCode> copied_codes = copyStatusCodes(codes, status_mutex);
   EXPECT_TRUE(containsStatusCode(copied_codes, StatusCode::TlsError));
 }
 
@@ -1804,7 +1790,6 @@ TEST(NtripClientTest, ConnectsWithVerifiedTlsAndPublishesRtcm)
 
   std::mutex status_mutex;
   std::vector<std::string> statuses;
-  std::mutex code_mutex;
   std::vector<StatusCode> codes;
   std::mutex frame_mutex;
   std::vector<std::vector<std::uint8_t>> frames;
@@ -1819,7 +1804,6 @@ TEST(NtripClientTest, ConnectsWithVerifiedTlsAndPublishesRtcm)
       {
         std::lock_guard<std::mutex> lock(status_mutex);
         statuses.push_back(status.message);
-        std::lock_guard<std::mutex> code_lock(code_mutex);
         codes.push_back(status.code);
       }));
 
@@ -1832,7 +1816,7 @@ TEST(NtripClientTest, ConnectsWithVerifiedTlsAndPublishesRtcm)
   client.stop();
   caster.stop();
 
-  const std::vector<StatusCode> copied_codes = copyStatusCodes(codes, code_mutex);
+  const std::vector<StatusCode> copied_codes = copyStatusCodes(codes, status_mutex);
   EXPECT_TRUE(containsStatusCode(copied_codes, StatusCode::TlsEstablished));
   EXPECT_TRUE(containsStatusCode(copied_codes, StatusCode::SessionAccepted));
   EXPECT_TRUE(containsStatusCode(copied_codes, StatusCode::StreamActive));
@@ -1864,7 +1848,6 @@ TEST(NtripClientTest, FailsTlsHostnameVerificationWithWrongServerName)
 
   std::mutex status_mutex;
   std::vector<std::string> statuses;
-  std::mutex code_mutex;
   std::vector<StatusCode> codes;
 
   ASSERT_TRUE(client.start(
@@ -1873,21 +1856,20 @@ TEST(NtripClientTest, FailsTlsHostnameVerificationWithWrongServerName)
       {
         std::lock_guard<std::mutex> lock(status_mutex);
         statuses.push_back(status.message);
-        std::lock_guard<std::mutex> code_lock(code_mutex);
         codes.push_back(status.code);
       }));
 
   ASSERT_TRUE(waitForPredicate([&]()
                                {
                                  const std::vector<StatusCode> copied =
-                                     copyStatusCodes(codes, code_mutex);
+                                     copyStatusCodes(codes, status_mutex);
                                  return containsStatusCode(copied, StatusCode::TlsError);
                                }));
 
   client.stop();
   caster.stop();
 
-  const std::vector<StatusCode> copied_codes = copyStatusCodes(codes, code_mutex);
+  const std::vector<StatusCode> copied_codes = copyStatusCodes(codes, status_mutex);
   EXPECT_TRUE(containsStatusCode(copied_codes, StatusCode::TlsError));
   const std::vector<std::string> copied_statuses = copyStatuses(statuses, status_mutex);
   EXPECT_TRUE(containsStatus(copied_statuses, "TLS"));
@@ -1915,7 +1897,6 @@ TEST(NtripClientTest, CountsRtcmCrcFailures)
 
   std::mutex status_mutex;
   std::vector<std::string> statuses;
-  std::mutex code_mutex;
   std::vector<StatusCode> codes;
 
   ASSERT_TRUE(client.start(
@@ -1924,14 +1905,13 @@ TEST(NtripClientTest, CountsRtcmCrcFailures)
       {
         std::lock_guard<std::mutex> lock(status_mutex);
         statuses.push_back(status.message);
-        std::lock_guard<std::mutex> code_lock(code_mutex);
         codes.push_back(status.code);
       }));
 
   ASSERT_TRUE(waitForPredicate([&]()
                                {
                                  const std::vector<StatusCode> copied =
-                                     copyStatusCodes(codes, code_mutex);
+                                     copyStatusCodes(codes, status_mutex);
                                  return containsStatusCode(copied, StatusCode::RtcmCrcError);
                                }));
 
@@ -1949,8 +1929,8 @@ TEST(NtripClientTest, CountsBufferTrimmedBytes)
   NtripClient client(config);
 
   const std::string payload(20000, 'A');
-  client.processRtcmBytes(
-      reinterpret_cast<const std::uint8_t*>(payload.data()), payload.size());
+  NtripClientTestAccess::processRtcmBytes(
+      client, reinterpret_cast<const std::uint8_t*>(payload.data()), payload.size());
 
   const ros_ntrip_client::NtripClientCounters counters = client.getCounters();
   EXPECT_GT(counters.buffer_trimmed_bytes, 0U);

@@ -15,6 +15,8 @@
 typedef struct ssl_ctx_st SSL_CTX;
 typedef struct ssl_st SSL;
 
+class NtripClientTestAccess;
+
 namespace ros_ntrip_client
 {
 
@@ -38,7 +40,7 @@ struct NtripClientConfig
   double connect_timeout_sec = 10.0;
   double read_timeout_sec = 10.0;
   double session_start_timeout_sec = 15.0;
-  double rtcm_timeout_sec = 4.0;
+  double rtcm_timeout_sec = 10.0;
   bool adaptive_reconnect = true;
   int adaptive_burst_max_attempts = 12;
   double adaptive_burst_window_sec = 60.0;
@@ -47,11 +49,12 @@ struct NtripClientConfig
   double reconnect_initial_delay_sec = 5.0;
   double reconnect_max_delay_sec = 300.0;
   double reconnect_backoff_multiplier = 2.0;
-  double transport_reconnect_initial_delay_sec = 1.0;
+  double transport_reconnect_initial_delay_sec = 5.0;
   double transport_reconnect_max_delay_sec = 10.0;
   double transport_reconnect_backoff_multiplier = 1.5;
   int max_attempts = 0;
-  bool send_initial_gga = false;
+  bool send_initial_gga = true;
+  std::string initial_gga_sentence;
 };
 
 struct NtripClientCounters
@@ -92,6 +95,7 @@ enum class StatusCode
   Backoff,
   StreamRecovered,
   ReadFailed,
+  WriteFailed,
   StoppedMaxAttempts,
   RtcmCrcError,
   RtcmBufferTrimmed
@@ -114,6 +118,8 @@ enum class FailureCategory
 
 class NtripClient
 {
+  friend class ::NtripClientTestAccess;
+
 public:
   using DataCallback = std::function<void(const std::vector<std::uint8_t>&)>;
   using StatusCallback = std::function<void(const StatusEvent&)>;
@@ -187,7 +193,7 @@ private:
   bool sendRequest(int socket_fd);
   bool readResponseHeaders(int socket_fd, std::string& headers);
   bool streamData(int socket_fd);
-  bool sleepForSeconds(double seconds) const;
+  bool sleepForSeconds(double seconds);
   bool ensureWakePipe();
   void closeWakePipe();
   void notifyWorker();

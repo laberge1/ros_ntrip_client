@@ -11,7 +11,7 @@
 #include <sstream>
 #include <string>
 
-#include <sys/select.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -503,23 +503,22 @@ bool NtripClient::streamData(int socket_fd)
 
     const bool tls_read_pending = hasPendingTlsReadData(socket_fd);
     int wait_rc = 1;
-    fd_set read_fds;
-    FD_ZERO(&read_fds);
+    pollfd poll_fds[2] = {};
+    int poll_count = 0;
     if (!tls_read_pending)
     {
-      FD_SET(socket_fd, &read_fds);
-      int max_fd = socket_fd;
+      poll_fds[0].fd = socket_fd;
+      poll_fds[0].events = POLLIN;
+      poll_count = 1;
       if (wake_pipe_read_fd_ >= 0)
       {
-        FD_SET(wake_pipe_read_fd_, &read_fds);
-        max_fd = std::max(max_fd, wake_pipe_read_fd_);
+        poll_fds[1].fd = wake_pipe_read_fd_;
+        poll_fds[1].events = POLLIN;
+        poll_count = 2;
       }
 
-      timeval timeout{};
-      timeout.tv_sec = static_cast<long>(timeout_sec);
-      timeout.tv_usec =
-          static_cast<long>((timeout_sec - static_cast<double>(timeout.tv_sec)) * 1e6);
-      wait_rc = select(max_fd + 1, &read_fds, nullptr, nullptr, &timeout);
+      const int timeout_ms = static_cast<int>(timeout_sec * 1000.0);
+      wait_rc = poll(poll_fds, static_cast<nfds_t>(poll_count), timeout_ms);
     }
 
     if (wait_rc == 0)
@@ -582,7 +581,7 @@ bool NtripClient::streamData(int socket_fd)
       return false;
     }
 
-    if (!tls_read_pending && wake_pipe_read_fd_ >= 0 && FD_ISSET(wake_pipe_read_fd_, &read_fds))
+    if (!tls_read_pending && poll_count >= 2 && (poll_fds[1].revents & POLLIN))
     {
       drainWakePipe();
       continue;
@@ -649,12 +648,24 @@ bool NtripClient::streamData(int socket_fd)
   return true;
 }
 
-bool NtripClient::sleepForSeconds(double seconds) const
+bool NtripClient::sleepForSeconds(double seconds)
 {
-  const auto deadline = std::chrono::steady_clock::now() + std::chrono::duration<double>(seconds);
-  while (running_ && std::chrono::steady_clock::now() < deadline)
+  if (wake_pipe_read_fd_ >= 0)
   {
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    pollfd pfd{};
+    pfd.fd = wake_pipe_read_fd_;
+    pfd.events = POLLIN;
+    const int timeout_ms = static_cast<int>(std::max(0.0, seconds) * 1000.0);
+    poll(&pfd, 1, timeout_ms);
+    drainWakePipe();
+  }
+  else
+  {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::duration<double>(seconds);
+    while (running_ && std::chrono::steady_clock::now() < deadline)
+    {
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
   }
   return running_;
 }
@@ -760,10 +771,11 @@ bool NtripClient::sendCurrentGga(int socket_fd)
     return false;
   }
 
-  if (sentence.back() != '\n')
+  while (!sentence.empty() && (sentence.back() == '\r' || sentence.back() == '\n'))
   {
-    sentence += "\r\n";
+    sentence.pop_back();
   }
+  sentence += "\r\n";
   if (!sendRaw(socket_fd, sentence))
   {
     return false;

@@ -35,6 +35,7 @@ std::string toString(StatusCode code)
     case StatusCode::Backoff: return "BACKOFF";
     case StatusCode::StreamRecovered: return "STREAM_RECOVERED";
     case StatusCode::ReadFailed: return "READ_FAILED";
+    case StatusCode::WriteFailed: return "WRITE_FAILED";
     case StatusCode::StoppedMaxAttempts: return "STOPPED_MAX_ATTEMPTS";
     case StatusCode::RtcmCrcError: return "RTCM_CRC_ERROR";
     case StatusCode::RtcmBufferTrimmed: return "RTCM_BUFFER_TRIMMED";

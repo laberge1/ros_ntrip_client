@@ -48,6 +48,8 @@ constexpr std::uint32_t kRtcmCrcLookup[] = {
 
 }  // namespace
 
+// Called only from the worker thread. session_.rtcm_buffer and reconnect_
+// fields are single-writer (worker thread only) and do not require mutex_.
 void NtripClient::processRtcmBytes(const std::uint8_t* data, std::size_t size)
 {
   if (data == nullptr || size == 0U)

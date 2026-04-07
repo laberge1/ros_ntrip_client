@@ -2,9 +2,9 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cerrno>
 #include <cstring>
-#include <initializer_list>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -14,7 +14,7 @@
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
-#include <sys/select.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/types.h>
@@ -77,16 +77,11 @@ timeval toTimeval(double seconds)
 
 bool waitForSocket(int socket_fd, bool write_ready, double timeout_sec)
 {
-  fd_set fds;
-  FD_ZERO(&fds);
-  FD_SET(socket_fd, &fds);
-  timeval timeout = toTimeval(timeout_sec);
-  const int rc = select(socket_fd + 1,
-                        write_ready ? nullptr : &fds,
-                        write_ready ? &fds : nullptr,
-                        nullptr,
-                        &timeout);
-  return rc > 0;
+  pollfd pfd{};
+  pfd.fd = socket_fd;
+  pfd.events = write_ready ? POLLOUT : POLLIN;
+  const int timeout_ms = static_cast<int>(std::max(0.0, timeout_sec) * 1000.0);
+  return poll(&pfd, 1, timeout_ms) > 0;
 }
 
 std::string trimMountpoint(const std::string& mountpoint)
@@ -142,16 +137,41 @@ std::string sanitizeSnippet(const std::string& input, std::size_t max_length)
   return snippet;
 }
 
-bool containsAny(const std::string& haystack, const std::initializer_list<const char*> needles)
+std::string extractStatusLine(const std::string& header_block)
 {
-  for (const char* needle : needles)
+  const std::size_t crlf = header_block.find("\r\n");
+  if (crlf != std::string::npos)
   {
-    if (haystack.find(needle) != std::string::npos)
-    {
-      return true;
-    }
+    return header_block.substr(0, crlf);
   }
-  return false;
+  const std::size_t lf = header_block.find('\n');
+  if (lf != std::string::npos)
+  {
+    return header_block.substr(0, lf);
+  }
+  return header_block;
+}
+
+bool statusLineContains(const std::string& status_line, const char* needle)
+{
+  return status_line.find(needle) != std::string::npos;
+}
+
+bool headerContainsCaseInsensitive(const std::string& headers, const std::string& needle)
+{
+  std::string lower_headers;
+  lower_headers.reserve(headers.size());
+  for (char ch : headers)
+  {
+    lower_headers.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
+  }
+  std::string lower_needle;
+  lower_needle.reserve(needle.size());
+  for (char ch : needle)
+  {
+    lower_needle.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
+  }
+  return lower_headers.find(lower_needle) != std::string::npos;
 }
 
 std::string currentSslError()
@@ -187,11 +207,7 @@ int sslPasswordCallback(char* buffer, int size, int, void* userdata)
 int NtripClient::connectToCaster()
 {
   std::call_once(g_openssl_init_once, []()
-                 {
-                   SSL_library_init();
-                   SSL_load_error_strings();
-                   OPENSSL_init_ssl(0, nullptr);
-                 });
+                 { OPENSSL_init_ssl(0, nullptr); });
 
   addrinfo hints;
   std::memset(&hints, 0, sizeof(hints));
@@ -474,17 +490,28 @@ bool NtripClient::hasPendingTlsReadData(int socket_fd) const
 
 bool NtripClient::sendRequest(int socket_fd)
 {
+  const bool is_ntrip_v1 = config_.ntrip_version.empty() ||
+                           config_.ntrip_version.find("Ntrip/1") == 0;
+  const std::string http_version = is_ntrip_v1 ? "HTTP/1.0" : "HTTP/1.1";
+
   std::ostringstream request;
-  request << "GET " << trimMountpoint(config_.mountpoint) << " HTTP/1.1\r\n";
+  request << "GET " << trimMountpoint(config_.mountpoint) << " " << http_version << "\r\n";
   request << "Host: " << config_.host << ":" << config_.port << "\r\n";
   request << "User-Agent: " << config_.user_agent << "\r\n";
-  request << "Ntrip-Version: " << config_.ntrip_version << "\r\n";
+  if (!is_ntrip_v1)
+  {
+    request << "Ntrip-Version: " << config_.ntrip_version << "\r\n";
+  }
   request << "Connection: close\r\n";
   request << "Accept: */*\r\n";
   if (!config_.username.empty())
   {
     request << "Authorization: Basic "
             << base64Encode(config_.username + ":" + config_.password) << "\r\n";
+  }
+  if (!is_ntrip_v1 && !config_.initial_gga_sentence.empty())
+  {
+    request << "Ntrip-GGA: " << config_.initial_gga_sentence << "\r\n";
   }
   request << "\r\n";
 
@@ -562,42 +589,45 @@ bool NtripClient::readResponseHeaders(int socket_fd, std::string& headers)
   }
 
   const std::string header_block = headers.substr(0, header_end);
-  const bool ok = containsAny(header_block, {"ICY 200 OK", "HTTP/1.0 200 OK", "HTTP/1.1 200 OK"});
+  const std::string status_line = extractStatusLine(header_block);
+  const bool ok = statusLineContains(status_line, "ICY 200 OK") ||
+                  statusLineContains(status_line, "HTTP/1.0 200 OK") ||
+                  statusLineContains(status_line, "HTTP/1.1 200 OK");
   if (!ok)
   {
     {
       std::lock_guard<std::mutex> lock(mutex_);
       session_.last_failure_category = FailureCategory::Service;
     }
-    if (containsAny(header_block, {"SOURCETABLE 200 OK"}))
+    if (statusLineContains(status_line, "SOURCETABLE 200 OK"))
     {
       setStatus(StatusCode::MountpointInvalid, "received sourcetable response; mountpoint is likely invalid");
     }
-    else if (containsAny(header_block, {"401"}))
+    else if (statusLineContains(status_line, "401"))
     {
       setStatus(StatusCode::AuthFailed, "received unauthorized response; check username, password, and mountpoint");
     }
-    else if (containsAny(header_block, {"403"}))
+    else if (statusLineContains(status_line, "403"))
     {
       setStatus(StatusCode::AccessForbidden, "received forbidden response; account or client is not allowed to access this stream");
     }
-    else if (containsAny(header_block, {"404"}))
+    else if (statusLineContains(status_line, "404"))
     {
       setStatus(StatusCode::MountpointInvalid, "received not-found response; mountpoint or path is likely invalid");
     }
-    else if (containsAny(header_block, {"429"}))
+    else if (statusLineContains(status_line, "429"))
     {
       setStatus(StatusCode::RateLimited, "received too-many-requests response; caster is rate limiting this client");
     }
-    else if (containsAny(header_block, {"502"}))
+    else if (statusLineContains(status_line, "502"))
     {
       setStatus(StatusCode::UpstreamError, "received bad-gateway response; upstream caster path is unhealthy");
     }
-    else if (containsAny(header_block, {"503"}))
+    else if (statusLineContains(status_line, "503"))
     {
       setStatus(StatusCode::ServiceUnavailable, "received service-unavailable response; caster is temporarily unavailable");
     }
-    else if (containsAny(header_block, {"504"}))
+    else if (statusLineContains(status_line, "504"))
     {
       setStatus(StatusCode::UpstreamError, "received gateway-timeout response; upstream caster path timed out");
     }
@@ -611,6 +641,16 @@ bool NtripClient::readResponseHeaders(int socket_fd, std::string& headers)
       setStatus(StatusCode::ProtocolError, std::string("unexpected response: ") +
                 sanitizeSnippet(header_block, 200U));
     }
+    return false;
+  }
+
+  if (headerContainsCaseInsensitive(header_block, "transfer-encoding: chunked"))
+  {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      session_.last_failure_category = FailureCategory::Service;
+    }
+    setStatus(StatusCode::ProtocolError, "chunked transfer encoding is not supported");
     return false;
   }
 
@@ -727,7 +767,7 @@ ssize_t NtripClient::writeSome(int socket_fd, const void* buffer, std::size_t bu
         continue;
       }
 
-      setStatus(StatusCode::ReadFailed, std::string("TLS write failed: ") + currentSslError());
+      setStatus(StatusCode::WriteFailed, std::string("TLS write failed: ") + currentSslError());
       return -1;
     }
     return -1;
@@ -744,7 +784,7 @@ ssize_t NtripClient::writeSome(int socket_fd, const void* buffer, std::size_t bu
     {
       continue;
     }
-    setStatus(StatusCode::ReadFailed, std::string("socket write failed: ") + std::strerror(errno));
+    setStatus(StatusCode::WriteFailed, std::string("socket write failed: ") + std::strerror(errno));
     return -1;
   }
 

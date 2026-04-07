@@ -16,7 +16,9 @@ tls_client_key_password: ""
 connect_timeout_sec: 10.0
 read_timeout_sec: 10.0
 session_start_timeout_sec: 15.0
-rtcm_timeout_sec: 4.0
+# Seconds without RTCM data before reconnecting. Some mountpoints transmit at
+# 1 Hz or slower; values below 10 may cause unnecessary reconnect churn.
+rtcm_timeout_sec: 10.0
 adaptive_reconnect: true
 adaptive_burst_max_attempts: 12
 adaptive_burst_window_sec: 60.0
@@ -25,14 +27,20 @@ adaptive_slow_interval_sec: 300.0
 reconnect_initial_delay_sec: 10.0
 reconnect_max_delay_sec: 300.0
 reconnect_backoff_multiplier: 2.0
-transport_reconnect_initial_delay_sec: 1.0
+# Minimum delay between transport-level reconnects. Public casters such as
+# RTK2GO require at least 5 seconds; lower values risk IP bans.
+transport_reconnect_initial_delay_sec: 5.0
 transport_reconnect_max_delay_sec: 10.0
 transport_reconnect_backoff_multiplier: 1.5
 max_attempts: 0
-send_initial_gga: false
+# Send a GGA sentence to the caster immediately after session acceptance.
+# Required for VRS mountpoints to begin receiving corrections.
+send_initial_gga: true
 gga_topic: "nmea"
 rtcm_frame_id: ""
-gga_send_interval_sec: 0.0
+# Interval for periodic GGA resends. Public casters (RTK2GO, Centipede) expect
+# GGA every 5-15 seconds for VRS streams; 0 disables periodic sends.
+gga_send_interval_sec: 10.0
 use_fixed_gga_position: false
 fixed_latitude_deg: 0.0
 fixed_longitude_deg: 0.0
