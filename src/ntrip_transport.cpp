@@ -174,6 +174,14 @@ bool headerContainsCaseInsensitive(const std::string& headers, const std::string
   return lower_headers.find(lower_needle) != std::string::npos;
 }
 
+bool usesChunkedTransferEncoding(const std::string& headers)
+{
+  std::string normalized = headers;
+  std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                 [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+  return normalized.find("transfer-encoding: chunked") != std::string::npos;
+}
+
 std::string currentSslError()
 {
   const unsigned long error_code = ERR_get_error();
@@ -644,28 +652,19 @@ bool NtripClient::readResponseHeaders(int socket_fd, std::string& headers)
     return false;
   }
 
-  if (headerContainsCaseInsensitive(header_block, "transfer-encoding: chunked"))
-  {
-    {
-      std::lock_guard<std::mutex> lock(mutex_);
-      session_.last_failure_category = FailureCategory::Service;
-    }
-    setStatus(StatusCode::ProtocolError, "chunked transfer encoding is not supported");
-    return false;
-  }
-
   const std::string remaining_body = headers.substr(header_end);
   headers = header_block;
 
   {
     std::lock_guard<std::mutex> lock(mutex_);
     session_.uplink_ready = true;
+    session_.response_is_chunked = usesChunkedTransferEncoding(header_block);
   }
   setStatus(StatusCode::SessionAccepted, "caster accepted stream");
 
   if (!remaining_body.empty())
   {
-    processRtcmBytes(reinterpret_cast<const std::uint8_t*>(remaining_body.data()), remaining_body.size());
+    processResponseBodyBytes(reinterpret_cast<const std::uint8_t*>(remaining_body.data()), remaining_body.size());
     dispatchRtcmFrames();
   }
 

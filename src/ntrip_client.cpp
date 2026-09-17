@@ -311,6 +311,11 @@ void NtripClient::resetSessionStateLocked()
   session_.bytes_received = 0U;
   session_.frames_published = 0U;
   session_.rtcm_buffer.clear();
+  session_.chunk_line_buffer.clear();
+  session_.chunk_bytes_remaining = 0U;
+  session_.chunk_terminator_bytes_seen = 0U;
+  session_.chunk_decode_state = SessionState::ChunkDecodeState::Size;
+  session_.response_is_chunked = false;
 }
 
 bool NtripClient::ensureWakePipe()
@@ -641,7 +646,7 @@ bool NtripClient::streamData(int socket_fd)
       return false;
     }
 
-    processRtcmBytes(buffer.data(), static_cast<std::size_t>(received));
+    processResponseBodyBytes(buffer.data(), static_cast<std::size_t>(received));
     dispatchRtcmFrames();
   }
 

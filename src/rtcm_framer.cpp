@@ -1,6 +1,8 @@
 #include "ros_ntrip_client/ntrip_client.h"
 
+#include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <cstdint>
 #include <mutex>
 #include <vector>
@@ -50,6 +52,73 @@ constexpr std::uint32_t kRtcmCrcLookup[] = {
 
 // Called only from the worker thread. session_.rtcm_buffer and reconnect_
 // fields are single-writer (worker thread only) and do not require mutex_.
+void NtripClient::processResponseBodyBytes(const std::uint8_t* data, std::size_t size)
+{
+  if (!session_.response_is_chunked)
+  {
+    processRtcmBytes(data, size);
+    return;
+  }
+
+  std::size_t offset = 0U;
+  while (offset < size)
+  {
+    if (session_.chunk_decode_state == SessionState::ChunkDecodeState::Size)
+    {
+      const std::uint8_t byte = data[offset++];
+      session_.chunk_line_buffer.push_back(byte);
+      if (byte != '\n') continue;
+      if (session_.chunk_line_buffer.size() < 2U ||
+          session_.chunk_line_buffer[session_.chunk_line_buffer.size() - 2U] != '\r')
+      {
+        setStatus(StatusCode::ProtocolError, "invalid HTTP chunk size line");
+        session_.chunk_line_buffer.clear();
+        continue;
+      }
+      const std::string line(session_.chunk_line_buffer.begin(), session_.chunk_line_buffer.end() - 2U);
+      char* end = nullptr;
+      const unsigned long parsed = std::strtoul(line.c_str(), &end, 16);
+      session_.chunk_line_buffer.clear();
+      if (end == line.c_str() || *end != '\0' || parsed == 0UL)
+      {
+        setStatus(StatusCode::ProtocolError, "invalid or terminal HTTP chunk");
+        continue;
+      }
+      session_.chunk_bytes_remaining = static_cast<std::size_t>(parsed);
+      session_.chunk_decode_state = SessionState::ChunkDecodeState::Data;
+      continue;
+    }
+
+    if (session_.chunk_decode_state == SessionState::ChunkDecodeState::Data)
+    {
+      const std::size_t count = std::min(size - offset, session_.chunk_bytes_remaining);
+      processRtcmBytes(data + offset, count);
+      offset += count;
+      session_.chunk_bytes_remaining -= count;
+      if (session_.chunk_bytes_remaining == 0U)
+      {
+        session_.chunk_decode_state = SessionState::ChunkDecodeState::Terminator;
+        session_.chunk_terminator_bytes_seen = 0U;
+      }
+      continue;
+    }
+
+    const std::uint8_t expected = session_.chunk_terminator_bytes_seen == 0U ? '\r' : '\n';
+    if (data[offset++] != expected)
+    {
+      setStatus(StatusCode::ProtocolError, "invalid HTTP chunk terminator");
+      session_.chunk_decode_state = SessionState::ChunkDecodeState::Size;
+      session_.chunk_terminator_bytes_seen = 0U;
+      continue;
+    }
+    if (++session_.chunk_terminator_bytes_seen == 2U)
+    {
+      session_.chunk_decode_state = SessionState::ChunkDecodeState::Size;
+      session_.chunk_terminator_bytes_seen = 0U;
+    }
+  }
+}
+
 void NtripClient::processRtcmBytes(const std::uint8_t* data, std::size_t size)
 {
   if (data == nullptr || size == 0U)
