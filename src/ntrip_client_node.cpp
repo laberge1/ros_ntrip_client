@@ -109,7 +109,7 @@ int main(int argc, char** argv)
                          {
                            client.updateGgaSentence(gga_to_send);
                          }
-                       })));
+                       }));
   }
 
   const bool started = client.start(
