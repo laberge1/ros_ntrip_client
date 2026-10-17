@@ -805,6 +805,76 @@ TEST(NtripClientTest, PublishesRtcmAndTransitionsToStreamActive)
   EXPECT_EQ(counters.frames_published, 1U);
 }
 
+TEST(NtripClientTest, DecodesChunkedResponseBeforeRtcmFraming)
+{
+  MockCaster caster([](int client_fd)
+                    {
+                      (void)readRequest(client_fd);
+
+                      const std::string response =
+                          "HTTP/1.1 200 OK\r\n"
+                          "Transfer-Encoding: chunked\r\n"
+                          "\r\n"
+                          "3\r\n";
+                      ASSERT_EQ(send(client_fd, response.data(), response.size(), 0),
+                                static_cast<ssize_t>(response.size()));
+                      std::this_thread::sleep_for(kShortDelay);
+
+                      ASSERT_EQ(send(client_fd, kMinimalRtcmFrame.data(), 3U, 0), 3);
+                      std::this_thread::sleep_for(kShortDelay);
+
+                      const std::string next_chunk = "\r\n3\r\n";
+                      ASSERT_EQ(send(client_fd, next_chunk.data(), next_chunk.size(), 0),
+                                static_cast<ssize_t>(next_chunk.size()));
+                      std::this_thread::sleep_for(kShortDelay);
+
+                      ASSERT_EQ(send(client_fd,
+                                     kMinimalRtcmFrame.data() + 3U,
+                                     kMinimalRtcmFrame.size() - 3U,
+                                     0),
+                                static_cast<ssize_t>(kMinimalRtcmFrame.size() - 3U));
+                      const std::string chunk_terminator = "\r\n";
+                      ASSERT_EQ(send(client_fd,
+                                     chunk_terminator.data(),
+                                     chunk_terminator.size(),
+                                     0),
+                                static_cast<ssize_t>(chunk_terminator.size()));
+                      std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                    });
+
+  NtripClientConfig config = makeConfig(caster.port());
+  NtripClient client(config);
+
+  std::mutex data_mutex;
+  std::vector<std::vector<std::uint8_t>> frames;
+
+  ASSERT_TRUE(client.start(
+      [&](const std::vector<std::uint8_t>& frame)
+      {
+        std::lock_guard<std::mutex> lock(data_mutex);
+        frames.push_back(frame);
+      }));
+
+  ASSERT_TRUE(waitForPredicate([&]()
+                               {
+                                 std::lock_guard<std::mutex> lock(data_mutex);
+                                 return !frames.empty();
+                               }));
+
+  client.stop();
+  caster.stop();
+
+  {
+    std::lock_guard<std::mutex> lock(data_mutex);
+    ASSERT_EQ(frames.size(), 1U);
+    EXPECT_EQ(frames.front(), kMinimalRtcmFrame);
+  }
+
+  const ros_ntrip_client::NtripClientCounters counters = client.getCounters();
+  EXPECT_EQ(counters.frames_published, 1U);
+  EXPECT_EQ(counters.crc_failures, 0U);
+}
+
 TEST(NtripClientTest, TimesOutWaitingForHeaders)
 {
   MockCaster caster([](int client_fd)
