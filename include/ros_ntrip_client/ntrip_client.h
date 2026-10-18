@@ -160,7 +160,13 @@ private:
 
   struct SessionState
   {
+    enum class ChunkDecodeState { Size, Data, Terminator };
     std::vector<std::uint8_t> rtcm_buffer;
+    std::vector<std::uint8_t> chunk_line_buffer;
+    std::size_t chunk_bytes_remaining = 0U;
+    std::size_t chunk_terminator_bytes_seen = 0U;
+    ChunkDecodeState chunk_decode_state = ChunkDecodeState::Size;
+    bool response_is_chunked = false;
     bool uplink_ready = false;
     std::uint64_t queued_gga_generation = 0U;
     std::uint64_t latest_gga_generation = 0U;
@@ -206,6 +212,7 @@ private:
   ssize_t readSome(int socket_fd, void* buffer, std::size_t buffer_size);
   ssize_t writeSome(int socket_fd, const void* buffer, std::size_t buffer_size);
   bool sendCurrentGga(int socket_fd);
+  void processResponseBodyBytes(const std::uint8_t* data, std::size_t size);
   void processRtcmBytes(const std::uint8_t* data, std::size_t size);
   bool dispatchRtcmFrames();
   bool extractRtcmFrame(std::vector<std::uint8_t>& frame);
