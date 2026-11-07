@@ -14,6 +14,8 @@ namespace
 
 constexpr std::uint8_t kRtcmPreamble = 0xD3U;
 constexpr std::size_t kMaxRtcmBufferSize = 10240U;
+// Includes the trailing CRLF; keep malformed caster input bounded across reads.
+constexpr std::size_t kMaxChunkSizeLineLength = 1024U;
 constexpr std::uint32_t kRtcmCrcLookup[] = {
     0x000000, 0x864CFB, 0x8AD50D, 0x0C99F6, 0x93E6E1, 0x15AA1A, 0x1933EC, 0x9F7F17,
     0xA18139, 0x27CDC2, 0x2B5434, 0xAD18CF, 0x3267D8, 0xB42B23, 0xB8B2D5, 0x3EFE2E,
@@ -52,12 +54,12 @@ constexpr std::uint32_t kRtcmCrcLookup[] = {
 
 // Called only from the worker thread. session_.rtcm_buffer and reconnect_
 // fields are single-writer (worker thread only) and do not require mutex_.
-void NtripClient::processResponseBodyBytes(const std::uint8_t* data, std::size_t size)
+bool NtripClient::processResponseBodyBytes(const std::uint8_t* data, std::size_t size)
 {
   if (!session_.response_is_chunked)
   {
     processRtcmBytes(data, size);
-    return;
+    return true;
   }
 
   std::size_t offset = 0U;
@@ -66,6 +68,11 @@ void NtripClient::processResponseBodyBytes(const std::uint8_t* data, std::size_t
     if (session_.chunk_decode_state == SessionState::ChunkDecodeState::Size)
     {
       const std::uint8_t byte = data[offset++];
+      if (session_.chunk_line_buffer.size() >= kMaxChunkSizeLineLength)
+      {
+        setStatus(StatusCode::ProtocolError, "HTTP chunk size line exceeds 1024 bytes");
+        return false;
+      }
       session_.chunk_line_buffer.push_back(byte);
       if (byte != '\n') continue;
       if (session_.chunk_line_buffer.size() < 2U ||
@@ -117,6 +124,7 @@ void NtripClient::processResponseBodyBytes(const std::uint8_t* data, std::size_t
       session_.chunk_terminator_bytes_seen = 0U;
     }
   }
+  return true;
 }
 
 void NtripClient::processRtcmBytes(const std::uint8_t* data, std::size_t size)

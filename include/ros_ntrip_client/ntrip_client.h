@@ -212,7 +212,7 @@ private:
   ssize_t readSome(int socket_fd, void* buffer, std::size_t buffer_size);
   ssize_t writeSome(int socket_fd, const void* buffer, std::size_t buffer_size);
   bool sendCurrentGga(int socket_fd);
-  void processResponseBodyBytes(const std::uint8_t* data, std::size_t size);
+  bool processResponseBodyBytes(const std::uint8_t* data, std::size_t size);
   void processRtcmBytes(const std::uint8_t* data, std::size_t size);
   bool dispatchRtcmFrames();
   bool extractRtcmFrame(std::vector<std::uint8_t>& frame);

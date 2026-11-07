@@ -481,11 +481,6 @@ bool NtripClient::streamData(int socket_fd)
 
   while (running_)
   {
-    if (sendQueuedGgaIfNeeded(socket_fd))
-    {
-      continue;
-    }
-
     double timeout_sec = config_.session_start_timeout_sec;
     {
       std::lock_guard<std::mutex> lock(mutex_);
@@ -506,27 +501,8 @@ bool NtripClient::streamData(int socket_fd)
       }
     }
 
-    const bool tls_read_pending = hasPendingTlsReadData(socket_fd);
-    int wait_rc = 1;
-    pollfd poll_fds[2] = {};
-    int poll_count = 0;
-    if (!tls_read_pending)
-    {
-      poll_fds[0].fd = socket_fd;
-      poll_fds[0].events = POLLIN;
-      poll_count = 1;
-      if (wake_pipe_read_fd_ >= 0)
-      {
-        poll_fds[1].fd = wake_pipe_read_fd_;
-        poll_fds[1].events = POLLIN;
-        poll_count = 2;
-      }
-
-      const int timeout_ms = static_cast<int>(timeout_sec * 1000.0);
-      wait_rc = poll(poll_fds, static_cast<nfds_t>(poll_count), timeout_ms);
-    }
-
-    if (wait_rc == 0)
+    // Check deadlines even while a caster continuously supplies non-RTCM bytes.
+    if (timeout_sec <= 0.0)
     {
       bool first_rtcm_received = false;
       std::chrono::steady_clock::time_point last_rtcm_at;
@@ -569,6 +545,35 @@ bool NtripClient::streamData(int socket_fd)
           return false;
         }
       }
+    }
+
+    if (sendQueuedGgaIfNeeded(socket_fd))
+    {
+      continue;
+    }
+
+    const bool tls_read_pending = hasPendingTlsReadData(socket_fd);
+    int wait_rc = 1;
+    pollfd poll_fds[2] = {};
+    int poll_count = 0;
+    if (!tls_read_pending)
+    {
+      poll_fds[0].fd = socket_fd;
+      poll_fds[0].events = POLLIN;
+      poll_count = 1;
+      if (wake_pipe_read_fd_ >= 0)
+      {
+        poll_fds[1].fd = wake_pipe_read_fd_;
+        poll_fds[1].events = POLLIN;
+        poll_count = 2;
+      }
+
+      const int timeout_ms = static_cast<int>(timeout_sec * 1000.0);
+      wait_rc = poll(poll_fds, static_cast<nfds_t>(poll_count), timeout_ms);
+    }
+
+    if (wait_rc == 0)
+    {
       continue;
     }
 
@@ -646,7 +651,7 @@ bool NtripClient::streamData(int socket_fd)
       return false;
     }
 
-    processResponseBodyBytes(buffer.data(), static_cast<std::size_t>(received));
+    if (!processResponseBodyBytes(buffer.data(), static_cast<std::size_t>(received))) return false;
     dispatchRtcmFrames();
   }
 

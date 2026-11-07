@@ -176,10 +176,35 @@ bool headerContainsCaseInsensitive(const std::string& headers, const std::string
 
 bool usesChunkedTransferEncoding(const std::string& headers)
 {
-  std::string normalized = headers;
-  std::transform(normalized.begin(), normalized.end(), normalized.begin(),
-                 [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
-  return normalized.find("transfer-encoding: chunked") != std::string::npos;
+  const auto trim = [](const std::string& value)
+  {
+    const auto first = value.find_first_not_of(" \t\r");
+    if (first == std::string::npos) return std::string();
+    const auto last = value.find_last_not_of(" \t\r");
+    return value.substr(first, last - first + 1U);
+  };
+  std::istringstream lines(headers);
+  std::string line;
+  while (std::getline(lines, line))
+  {
+    const auto colon = line.find(':');
+    if (colon == std::string::npos) continue;
+    std::string name = trim(line.substr(0, colon));
+    std::transform(name.begin(), name.end(), name.begin(),
+                   [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+    if (name != "transfer-encoding") continue;
+
+    std::istringstream values(line.substr(colon + 1U));
+    std::string coding;
+    while (std::getline(values, coding, ','))
+    {
+      coding = trim(coding);
+      std::transform(coding.begin(), coding.end(), coding.begin(),
+                     [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+      if (coding == "chunked") return true;
+    }
+  }
+  return false;
 }
 
 std::string currentSslError()
@@ -664,7 +689,9 @@ bool NtripClient::readResponseHeaders(int socket_fd, std::string& headers)
 
   if (!remaining_body.empty())
   {
-    processResponseBodyBytes(reinterpret_cast<const std::uint8_t*>(remaining_body.data()), remaining_body.size());
+    if (!processResponseBodyBytes(reinterpret_cast<const std::uint8_t*>(remaining_body.data()),
+                                  remaining_body.size()))
+      return false;
     dispatchRtcmFrames();
   }
 
