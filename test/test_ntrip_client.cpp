@@ -1245,7 +1245,10 @@ TEST(NtripClientTest, TimesOutAfterActiveStreamStopsDeliveringRtcm)
   ASSERT_TRUE(waitForPredicate([&]()
                                {
                                  const std::vector<std::string> copied = copyStatuses(statuses, status_mutex);
-                                 return containsStatus(copied, "RTCM data not received for");
+                                 // Both callbacks are asynchronous; stopping after the timeout alone
+                                 // can prevent the worker from emitting the backoff event.
+                                 return containsStatus(copied, "RTCM data not received for") &&
+                                        containsStatus(copied, "stream disconnected, backing off for");
                                }));
 
   client.stop();
